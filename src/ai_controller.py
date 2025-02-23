@@ -1302,16 +1302,16 @@ Respond with one word: SUCCESS or FAILURE.
                     return True
                     
                 escaped_text = text.replace('"', '\\"').replace('\\', '\\\\')
-                applescript = f'''
-                tell application "System Events"
-                    delay {self.ACTION_DELAY}
-                    keystroke "{escaped_text}"
-                    delay {self.TYPE_DELAY}
-                end tell
-                '''
-                subprocess.run(["osascript", "-e", applescript], check=True)
-                logging.debug("Typed text successfully: %s", text)
-                return True
+            applescript = f'''
+            tell application "System Events"
+                delay {self.ACTION_DELAY}
+                keystroke "{escaped_text}"
+                delay {self.TYPE_DELAY}
+            end tell
+            '''
+            subprocess.run(["osascript", "-e", applescript], check=True)
+            logging.debug("Typed text successfully: %s", text)
+            return True
             
         except subprocess.CalledProcessError as e:
             logging.exception("Failed to type text: %s", e)
@@ -1887,7 +1887,7 @@ Respond with one word: SUCCESS or FAILURE.
             return image  # Return original if resize fails
 
     def execute_step(self, step, retry_count=0, previous_attempts=None):
-        """Execute a single automation step using the four basic action types."""
+        """Execute a single step in the task sequence."""
         MAX_RETRIES = 3
         if previous_attempts is None:
             previous_attempts = []
@@ -1922,74 +1922,77 @@ Respond with one word: SUCCESS or FAILURE.
             try:
                 # Take initial screenshot for AI analysis
                 initial_screenshot = self.capture_grid_screenshot()
+            except Exception as e:
+                logging.error("Failed to capture initial screenshot: %s", e)
+                return None
+            
+            # Handle each action type
+            if action_type == "TYPE":
+                # Save screenshot with action annotation
+                if initial_screenshot:
+                    self.save_ai_analysis_image(initial_screenshot, action_type="TYPE", 
+                                              verification_result="ATTEMPT")
                 
-                # Handle each action type
-                if action_type == "TYPE":
-                    # Save screenshot with action annotation
-                    if initial_screenshot:
-                        self.save_ai_analysis_image(initial_screenshot, action_type="TYPE", 
-                                                  verification_result="ATTEMPT")
-                    
-                    # Enhanced wait handling
-                    if details.lower().startswith("wait"):
-                        wait_spec = details[4:].strip() if len(details) > 4 else ""
-                        if wait_spec:
-                            # Parse the wait time from the specification
-                            wait_time = self.wait_handler.parse_wait_time(wait_spec)
-                            description = f"Explicit wait requested: {wait_spec}"
-                        else:
-                            # Get contextual wait time if no specific time given
-                            wait_time = self.wait_handler.get_contextual_wait_time(error_context)
-                            description = "Default wait period"
-                            
-                        # Execute the wait with progress updates
-                        self.wait_handler.wait_with_progress(wait_time, description)
-                        return "automation_sequence", "SUCCESS"
-                    elif details.startswith("file:"):
-                        # Handle file editing
-                        file_path = details[5:].strip()  # Remove "file:" prefix
-                        from pathlib import Path
-                        target_file = Path(self.workspace_root) / file_path
-                        
-                        # Use edit_file tool for direct file editing
-                        if target_file.exists():
-                            with open(target_file, 'a') as f:  # Append mode
-                                f.write(details + '\n')
-                            return "file_edit", "SUCCESS"
-                        else:
-                            with open(target_file, 'w') as f:  # Create new file
-                                f.write(details + '\n')
-                            return "file_edit", "SUCCESS"
+                # Enhanced wait handling
+                if details.lower().startswith("wait"):
+                    wait_spec = details[4:].strip() if len(details) > 4 else ""
+                    if wait_spec:
+                        # Parse the wait time from the specification
+                        wait_time = self.wait_handler.parse_wait_time(wait_spec)
+                        description = f"Explicit wait requested: {wait_spec}"
                     else:
-                        # For terminal or text input, use type_text
-                        success = self.type_text(details)
-                        return "automation_sequence", "SUCCESS" if success else "FAILURE"
+                        # Get contextual wait time if no specific time given
+                        wait_time = self.wait_handler.get_contextual_wait_time(error_context)
+                        description = "Default wait period"
+                        
+                    # Execute the wait with progress updates
+                    self.wait_handler.wait_with_progress(wait_time, description)
+                    return "automation_sequence", "SUCCESS"
+                elif details.startswith("file:"):
+                    # Handle file editing
+                    file_path = details[5:].strip()  # Remove "file:" prefix
+                    from pathlib import Path
+                    target_file = Path(self.workspace_root) / file_path
                     
-                elif action_type == "HOTKEY":
-                    # First try exact match in hotkey_map
-                    hotkey = self.hotkey_map.get(details.lower())
-                    if not hotkey:
-                        # If not found, try to normalize the hotkey format
-                        normalized = details.lower().replace(" ", "+").replace("-", "+")
-                        hotkey = self.hotkey_map.get(normalized)
-                        if not hotkey:
-                            raise ValueError(f"Unknown hotkey: {details}")
-                    
-                    success = self.execute_hotkey(hotkey)
-                    # Use wait handler for post-hotkey delay
-                    self.wait_handler.wait_with_progress(
-                        self.wait_handler.default_waits['transition'],
-                        "Waiting for hotkey action to complete"
-                    )
+                    # Use edit_file tool for direct file editing
+                    if target_file.exists():
+                        with open(target_file, 'a') as f:  # Append mode
+                            f.write(details + '\n')
+                        return "file_edit", "SUCCESS"
+                    else:
+                        with open(target_file, 'w') as f:  # Create new file
+                            f.write(details + '\n')
+                        return "file_edit", "SUCCESS"
+                else:
+                    # For terminal or text input, use type_text
+                    success = self.type_text(details)
                     return "automation_sequence", "SUCCESS" if success else "FAILURE"
                     
-                elif action_type == "CLICK":
-                    # Take a screenshot for AI analysis
-                    screenshot = self.capture_grid_screenshot()
-                    timestamp = time.strftime("%Y%m%d_%H%M%S_%f")
-                    
-                    # First try to identify if there's a hotkey that could accomplish this action
-                    hotkey_prompt = f"""
+            elif action_type == "HOTKEY":
+                # First try exact match in hotkey_map
+                hotkey = self.hotkey_map.get(details.lower())
+                if not hotkey:
+                    # If not found, try to normalize the hotkey format
+                    normalized = details.lower().replace(" ", "+").replace("-", "+")
+                    hotkey = self.hotkey_map.get(normalized)
+                    if not hotkey:
+                        raise ValueError(f"Unknown hotkey: {details}")
+                
+                success = self.execute_hotkey(hotkey)
+                # Use wait handler for post-hotkey delay
+                self.wait_handler.wait_with_progress(
+                    self.wait_handler.default_waits['transition'],
+                    "Waiting for hotkey action to complete"
+                )
+                return "automation_sequence", "SUCCESS" if success else "FAILURE"
+                
+            elif action_type == "CLICK":
+                # Take a screenshot for AI analysis
+                screenshot = self.capture_grid_screenshot()
+                timestamp = time.strftime("%Y%m%d_%H%M%S_%f")
+                
+                # First try to identify if there's a hotkey that could accomplish this action
+                hotkey_prompt = f"""
 Analyze this action request: "{details}"
 Is there a common keyboard shortcut/hotkey that could accomplish this action instead of clicking?
 Consider standard macOS shortcuts like:
@@ -2011,33 +2014,32 @@ Consider standard macOS shortcuts like:
 
 Respond with ONLY the hotkey if one exists (e.g., "command+n"), or "NONE" if no suitable hotkey exists.
 """
-                    try:
-                        hotkey_response = self.executor.models.generate_content(
-                            model="gemini-2.0-flash-thinking-exp-01-21",
-                            contents=hotkey_prompt + "\n" + details
-                        )
-                        suggested_hotkey = hotkey_response.text.strip().lower()
-                        
-                        if suggested_hotkey != "none":
-                            # Try to normalize the suggested hotkey
-                            normalized = suggested_hotkey.replace(" ", "+").replace("-", "+")
-                            if normalized in self.hotkey_map:
-                                logging.info(f"Found hotkey alternative: {normalized} for action: {details}")
-                                success = self.execute_hotkey(self.hotkey_map[normalized])
-                                if success:
-                                    # Use wait handler for post-hotkey delay
-                                    self.wait_handler.wait_with_progress(
-                                        self.wait_handler.default_waits['transition'],
-                                        "Waiting for hotkey action to complete"
-                                    )
-                                    return "automation_sequence", "SUCCESS"
-                        # If hotkey fails or not found, continue with normal click action
-                    except Exception as e:
-                        logging.warning(f"Error checking for hotkey alternative: {e}")
+                try:
+                    hotkey_response = self.executor.models.generate_content(
+                        model="gemini-2.0-flash-thinking-exp-01-21",
+                        contents=hotkey_prompt + "\n" + details
+                    )
+                    suggested_hotkey = hotkey_response.text.strip().lower()
                     
-                    # If no hotkey or hotkey failed, proceed with normal click action
-                    # Create AI prompt for coordinate identification
-                    prompt = f"""
+                    if suggested_hotkey != "none":
+                        # Try to normalize the suggested hotkey
+                        normalized = suggested_hotkey.replace(" ", "+").replace("-", "+")
+                        if normalized in self.hotkey_map:
+                            logging.info(f"Found hotkey alternative: {normalized} for action: {details}")
+                            success = self.execute_hotkey(self.hotkey_map[normalized])
+                            if success:
+                                # Use wait handler for post-hotkey delay
+                                self.wait_handler.wait_with_progress(
+                                    self.wait_handler.default_waits['transition'],
+                                    "Waiting for hotkey action to complete"
+                                )
+                                return "automation_sequence", "SUCCESS"
+                except Exception as e:
+                    logging.warning(f"Error checking for hotkey alternative: {e}")
+                
+                # If no hotkey or hotkey failed, proceed with normal click action
+                # Create AI prompt for coordinate identification
+                prompt = f"""
 Analyze this screenshot and find the target: "{details}"
 Look for:
 1. Buttons, links, or UI elements matching the description
@@ -2053,61 +2055,61 @@ IMPORTANT: Return ONLY the grid coordinate in the exact format aa01 to na40, whe
 
 If no matches are found, respond with "NOT_FOUND"
 """
-                    # Get coordinate from AI
-                    response = self.executor.models.generate_content(
-                        model="gemini-2.0-flash-thinking-exp-01-21",
-                        contents=[prompt, screenshot]
-                    )
-                    
-                    coordinate = response.text.strip().lower()
-                    
-                    # Clean up the coordinate - remove any JSON or extra text
-                    import re
-                    coord_match = re.search(r'[a-n][a-n]\d{2}', coordinate)
-                    if coord_match:
-                        coordinate = coord_match.group(0)
-                        # Save screenshot with target annotation
-                        if screenshot:
-                            self.save_ai_analysis_image(screenshot, coordinate=coordinate,
-                                                      action_type="CLICK_TARGET")
-                    
-                    # Validate the coordinate format
-                    if not self.screen_mapper._validate_coordinate_format(coordinate):
-                        if retry_count < MAX_RETRIES:
-                            logging.warning(f"Invalid coordinate format: {coordinate}, retrying...")
-                            return self.execute_step(step, retry_count + 1, previous_attempts)
-                        else:
-                            raise ValueError(f"Invalid coordinate format: {coordinate}")
-                    
-                    # Execute the click with adjustment
-                    success = self.execute_click_with_adjustment(coordinate)
-                    return "click", "SUCCESS" if success else "FAILURE"
-                    
-                elif action_type == "TERMINAL":
-                    success = self.execute_command(details)
-                    return "terminal", "SUCCESS" if success else "FAILURE"
-                    
-                else:
-                    raise ValueError(f"Unknown action type: {action_type}")
+                # Get coordinate from AI
+                response = self.executor.models.generate_content(
+                    model="gemini-2.0-flash-thinking-exp-01-21",
+                    contents=[prompt, screenshot]
+                )
                 
-            except Exception as e:
-                # Try automated troubleshooting
-                if self.troubleshooter.handle_error(e, error_context):
-                    # If troubleshooter fixed the issue, retry the step
-                    return self.execute_step(step, retry_count, previous_attempts)
+                coordinate = response.text.strip().lower()
                 
-                # If troubleshooting failed and we haven't exceeded retries
-                if retry_count < MAX_RETRIES:
-                    # Use wait handler for retry delay
-                    self.wait_handler.wait_with_progress(
-                        self.wait_handler.default_waits['animation'],
-                        "Waiting before retry"
-                    )
-                    return self.execute_step(step, retry_count + 1, previous_attempts)
+                # Clean up the coordinate - remove any JSON or extra text
+                import re
+                coord_match = re.search(r'[a-n][a-n]\d{2}', coordinate)
+                if coord_match:
+                    coordinate = coord_match.group(0)
+                    # Save screenshot with target annotation
+                    if screenshot:
+                        self.save_ai_analysis_image(screenshot, coordinate=coordinate,
+                                                  action_type="CLICK_TARGET")
                 
-                # If all retries and troubleshooting failed
-                return "error", str(e)
+                # Validate the coordinate format
+                if not self.screen_mapper._validate_coordinate_format(coordinate):
+                    if retry_count < MAX_RETRIES:
+                        logging.warning(f"Invalid coordinate format: {coordinate}, retrying...")
+                        return self.execute_step(step, retry_count + 1, previous_attempts)
+                    else:
+                        raise ValueError(f"Invalid coordinate format: {coordinate}")
                 
+                # Execute the click with adjustment
+                success = self.execute_click_with_adjustment(coordinate)
+                return "click", "SUCCESS" if success else "FAILURE"
+                
+            elif action_type == "TERMINAL":
+                success = self.execute_command(details)
+                return "terminal", "SUCCESS" if success else "FAILURE"
+                
+            else:
+                raise ValueError(f"Unknown action type: {action_type}")
+                
+        except Exception as e:
+            # Try automated troubleshooting
+            if self.troubleshooter.handle_error(e, error_context):
+                # If troubleshooter fixed the issue, retry the step
+                return self.execute_step(step, retry_count, previous_attempts)
+            
+            # If troubleshooting failed and we haven't exceeded retries
+            if retry_count < MAX_RETRIES:
+                # Use wait handler for retry delay
+                self.wait_handler.wait_with_progress(
+                    self.wait_handler.default_waits['animation'],
+                    "Waiting before retry"
+                )
+                return self.execute_step(step, retry_count + 1, previous_attempts)
+            
+            # If all retries and troubleshooting failed
+            return "error", str(e)
+            
         except Exception as e:
             logging.exception("Error executing step: %s", e)
             return "error", str(e)
@@ -2166,6 +2168,7 @@ If no matches are found, respond with "NOT_FOUND"
     def execute_click_with_adjustment(self, coordinate, retry_count=0, max_attempts=3):
         """
         Execute a click with position adjustment based on AI analysis.
+        Uses simulated clicks and reduced screenshot captures for better performance.
         
         Args:
             coordinate (str): The grid coordinate to click
@@ -2176,144 +2179,139 @@ If no matches are found, respond with "NOT_FOUND"
             bool: True if click was successful, False otherwise
         """
         try:
-            # Take before screenshot
+            # Take a single screenshot for both simulation and verification
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            before_path = self.screenshots_dir / f"click_{timestamp}_before.png"
             
-            # Capture and save before screenshot
-            with mss() as sct:
-                # Get the primary monitor
-                monitor = sct.monitors[1]  # Primary monitor is usually index 1
-                
-                # Capture the entire monitor
-                screenshot = sct.grab(monitor)
-                
-                # Convert to PIL Image
-                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-                
-                # Save the screenshot
-                img.save(str(before_path))
-                logging.info("Saved before screenshot to: %s", before_path)
-                
-                # Resize image for AI analysis
-                resized_before = self._resize_for_ai(img)
+            # Use the cached screenshot if available and recent
+            current_time = time.time()
+            if (self.last_screenshot is not None and 
+                current_time - self.last_screenshot_time < self.SCREENSHOT_CACHE_TIME):
+                screen_image = self.last_screenshot
+                logging.debug("Using cached screenshot for click simulation")
+            else:
+                with mss() as sct:
+                    monitor = sct.monitors[1]  # Primary monitor
+                    screenshot = sct.grab(monitor)
+                    screen_image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                    self.last_screenshot = screen_image
+                    self.last_screenshot_time = current_time
             
-            # Execute the click
+            # Calculate click position
+            cell_width = screen_image.width // 40
+            cell_height = screen_image.height // 40
+            
+            # Calculate column index based on coordinate
+            first_letter = coordinate[0]
+            second_letter = coordinate[1]
+            col = (ord(first_letter) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
+            row = int(coordinate[2:]) - 1
+            
+            # Calculate target position
+            target_x = col * cell_width + (cell_width // 2)
+            target_y = row * cell_height + (cell_height // 2)
+            
+            # Create a simulated "after click" image by drawing click indicators
+            simulated_after = screen_image.copy()
+            draw = ImageDraw.Draw(simulated_after)
+            
+            # Draw click visualization
+            click_radius = 20
+            draw.ellipse([target_x - click_radius, target_y - click_radius,
+                         target_x + click_radius, target_y + click_radius],
+                        outline=(255, 0, 0), width=2)
+            
+            # Draw crosshair
+            draw.line([target_x - click_radius, target_y,
+                      target_x + click_radius, target_y],
+                     fill=(255, 0, 0), width=2)
+            draw.line([target_x, target_y - click_radius,
+                      target_x, target_y + click_radius],
+                     fill=(255, 0, 0), width=2)
+            
+            # Add click annotation
+            try:
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
+            except:
+                font = ImageFont.load_default()
+            
+            annotation_text = f"Click at {coordinate} ({target_x}, {target_y})"
+            draw.text((target_x + click_radius + 5, target_y - 10),
+                     annotation_text, fill=(255, 0, 0), font=font)
+            
+            # Save the annotated images for verification
+            annotated_path = self.screenshots_dir / f"click_simulation_{timestamp}.png"
+            simulated_after.save(str(annotated_path))
+            
+            # Execute the actual click
             success = self.screen_mapper.execute_command(coordinate)
             if not success:
                 logging.warning("Initial click failed")
                 return False
-                
-            # Wait for UI to update - increase wait time based on context
-            base_wait = 0.5
-            context_wait = 0.0
             
-            # Add context-based wait times
-            if hasattr(self, 'current_step_description'):
-                desc = self.current_step_description.lower()
-                if any(term in desc for term in ['menu', 'dropdown', 'list']):
-                    context_wait += 0.3  # Menus/dropdowns need more time
-                if any(term in desc for term in ['load', 'open', 'start']):
-                    context_wait += 0.5  # Loading/opening actions need more time
-                if any(term in desc for term in ['save', 'create', 'new']):
-                    context_wait += 0.4  # Save/create actions need more time
+            # Use a shorter wait time since we're not capturing multiple screenshots
+            wait_time = 0.2 + (retry_count * 0.1)
+            time.sleep(wait_time)
             
-            total_wait = base_wait + context_wait + (retry_count * 0.2)
-            time.sleep(total_wait)
-            
-            # Take after screenshot
-            after_path = self.screenshots_dir / f"click_{timestamp}_after.png"
-            with mss() as sct:
-                # Capture after screenshot
-                screenshot = sct.grab(monitor)
-                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-                img.save(str(after_path))
-                logging.info("Saved after screenshot to: %s", after_path)
-                
-                # Resize image for AI analysis
-                resized_after = self._resize_for_ai(img)
-            
-            # Create verification prompt
+            # Create verification prompt with simulated click visualization
             prompt = f"""
-You are a strict verification system analyzing two screenshots taken before and after a click action.
-The click was intended to: {self.current_step_description if hasattr(self, 'current_step_description') else 'perform an action'}
+Analyze this click simulation for coordinate {coordinate}.
+Target: {self.current_step_description if hasattr(self, 'current_step_description') else 'perform an action'}
 
-CRITICAL REQUIREMENTS for SUCCESS:
-1. There MUST be clear, visible changes between the before and after screenshots that match the intended action
-2. The changes MUST be in the expected location/region of the click
-3. The changes MUST make sense for the intended action
-4. There must be NO error messages or unexpected states
-5. The UI must be in a stable state (no partial animations or loading indicators)
-
-Common changes to look for:
-- Button state changes (pressed, highlighted, activated)
-- Menu or dropdown opening/closing
-- New windows or dialogs appearing
-- Navigation to new pages/views
-- Text or content updates
-- Selection state changes
-- Focus changes
-
-IMPORTANT: Default to FAILURE unless you are CERTAIN the action succeeded.
+The red indicators show where the click will be performed.
+Verify that:
+1. The click position is on the correct UI element
+2. The element is clickable and visible
+3. The click position makes sense for the intended action
+4. There are no obstructions or overlays at the click position
 
 Respond with ONLY one of:
-- SUCCESS (Details about what specific changes were observed)
-- FAILURE (Reason why it failed or what was missing)
-- UNCLEAR (Specific reason why the outcome cannot be determined)
-
-Example responses:
-"SUCCESS (Button changed to pressed state and menu opened)"
-"FAILURE (No visible changes observed in UI)"
-"UNCLEAR (View partially obscured by animation)"
+- APPROVE (Click position is correct)
+- ADJUST_LEFT, ADJUST_RIGHT, ADJUST_UP, or ADJUST_DOWN (If position needs adjustment)
+- REJECT (If position is completely wrong)
 """
-            try:
-                # Send resized images to AI for verification
-                verification = self.executor.models.generate_content(
-                    model="gemini-2.0-flash-thinking-exp-01-21",
-                    contents=[prompt, resized_before, resized_after]
-                )
-                
-                verification_text = verification.text.strip().upper()
-                logging.info("Click verification result: %s", verification_text)
-                
-                # Extract the details from the response
-                match = re.match(r"(SUCCESS|FAILURE|UNCLEAR)\s*\((.*?)\)", verification_text)
-                if match:
-                    status, details = match.groups()
-                    logging.info("Verification details: %s - %s", status, details)
-                else:
-                    status = "UNCLEAR"
-                    details = "Could not parse verification response"
-                    logging.warning("Could not parse verification response: %s", verification_text)
-                
-                if status == "SUCCESS":
-                    # Log the successful verification details
-                    logging.info("Click verified successful: %s", details)
-                    return True
-                elif status in ["FAILURE", "UNCLEAR"]:
-                    if retry_count < max_attempts - 1:
-                        # Log the retry attempt
-                        logging.warning("Click verification failed (%s: %s), retrying...", status, details)
-                        # Increase wait time for next attempt
-                        time.sleep(0.5 + (retry_count * 0.3))
-                        return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
-                    else:
-                        # Log the final failure
-                        logging.error("Click failed after %d attempts. Last status: %s - %s", 
-                                    max_attempts, status, details)
-                        return False
-                else:
-                    logging.warning("Unexpected verification status: %s", status)
-                    return False
-                    
-            except Exception as api_error:
-                logging.error("Error during AI verification: %s", api_error)
+            # Get verification from AI
+            verification = self.executor.models.generate_content(
+                model="gemini-2.0-flash-thinking-exp-01-21",
+                contents=[prompt, simulated_after]
+            )
+            
+            result = verification.text.strip().upper()
+            logging.info("Click position verification: %s", result)
+            
+            if result.startswith("APPROVE"):
+                return True
+            elif result.startswith("ADJUST"):
                 if retry_count < max_attempts - 1:
-                    logging.warning("Verification error, retrying...")
+                    # Apply adjustment and retry
+                    adjustment = 5  # pixels
+                    if "LEFT" in result:
+                        target_x -= adjustment
+                    elif "RIGHT" in result:
+                        target_x += adjustment
+                    elif "UP" in result:
+                        target_y -= adjustment
+                    elif "DOWN" in result:
+                        target_y += adjustment
+                    
+                    # Create adjusted coordinate
+                    new_col = int(target_x / cell_width)
+                    new_row = int(target_y / cell_height)
+                    new_coordinate = f"a{chr(ord('a') + new_col)}{new_row+1:02d}"
+                    
+                    logging.info("Adjusting click position: %s -> %s", coordinate, new_coordinate)
+                    return self.execute_click_with_adjustment(new_coordinate, retry_count + 1, max_attempts)
+                else:
+                    logging.error("Max adjustment attempts reached")
+                    return False
+            else:
+                if retry_count < max_attempts - 1:
+                    logging.warning("Click position rejected, retrying...")
                     time.sleep(0.5)
                     return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
-                return False
-                
+                else:
+                    logging.error("Click position rejected after max attempts")
+                    return False
+                    
         except Exception as e:
             logging.exception("Error in click execution: %s", e)
             if retry_count < max_attempts - 1:

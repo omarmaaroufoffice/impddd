@@ -657,113 +657,28 @@ class ScreenMapper(QMainWindow):
         except Exception as e:
             logging.exception("Error pre-registering coordinates: %s", e)
 
-    def execute_command(self, coordinate=None):
-        """
-        Execute a click command using pre-registered coordinates.
-        """
+    def execute_command(self, coordinate):
         try:
-            if coordinate is None:
-                coordinate = self.command_input.text().strip().lower()
-            
-            # If we have a last successful coordinate and this is a verification step, reuse it
-            if self.last_successful_coordinate and "verify" in coordinate.lower():
-                coordinate = self.last_successful_coordinate
-                logging.info("Reusing last successful coordinate: %s", coordinate)
-            
-            # Take a before screenshot
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            before_path = self.screenshots_dir / f"click_{timestamp}_before.png"
-            if os.path.exists(self.screenshot_path):
-                import shutil
-                shutil.copy2(self.screenshot_path, before_path)
-                logging.info("Saved before screenshot to: %s", before_path)
-            
-            # Validate grid coordinate format
             if not self._validate_coordinate_format(coordinate):
-                error_msg = f"Invalid grid coordinate format: {coordinate}. Must be in format aa01-na40"
-                self.status_label.setText(error_msg)
-                logging.error(error_msg)
                 return False
-
-            # Get pre-registered click position
-            if coordinate not in self.click_positions:
-                error_msg = f"Invalid coordinate: {coordinate}. Not found in registered positions."
-                self.status_label.setText(error_msg)
-                logging.error(error_msg)
-                return False
-                
+            
             x, y = self.click_positions[coordinate]
-
-            # Validate coordinates are within screen bounds
-            if x < 0 or x >= self.actual_width or y < 0 or y >= self.actual_height:
-                error_msg = f"Click position ({x}, {y}) for coordinate {coordinate} is out of screen bounds"
-                self.status_label.setText(error_msg)
-                logging.error(error_msg)
-                return False
-
-            # Log detailed information about the click
-            logging.info("Grid click details:")
-            logging.info("  Coordinate: %s", coordinate)
-            logging.info("  Target pixel: (%d, %d)", x, y)
-            logging.info("  Screen bounds: %dx%d", self.actual_width, self.actual_height)
-            logging.info("  Cell dimensions: %dx%d", self.actual_width // self.grid_size, self.actual_height // self.grid_size)
-
-            # Move mouse to position with multiple retries
-            for attempt in range(3):
-                try:
-                    # Execute the click using pre-registered position
-                    success = self.move_mouse_to_pixel(x, y)
-                    if success:
-                        break
-                    logging.warning("Mouse movement attempt %d failed, retrying...", attempt + 1)
-                    time.sleep(0.5)  # Wait before retry
-                except Exception as e:
-                    logging.error("Mouse movement attempt %d failed: %s", attempt + 1, e)
-                    if attempt == 2:  # Last attempt
-                        raise
-                    time.sleep(0.5)  # Wait before retry
+            
+            # Single attempt with minimal verification
+            success = self.move_mouse_to_pixel(x, y)
             
             if success:
-                # Store successful coordinate for future verification steps
-                if not "verify" in coordinate.lower():
-                    self.last_successful_coordinate = coordinate
-                    logging.info("Stored successful coordinate: %s", coordinate)
+                self.last_successful_coordinate = coordinate
+                self.status_label.setText(f"Clicked {coordinate}")
                 
-                self.status_label.setText(f"Clicked grid {coordinate} at pixel ({x}, {y})")
-                
-                # Draw a temporary marker at click location
+                # Optional: Draw marker without saving screenshot
                 if QThread.currentThread() == QApplication.instance().thread():
-                    self.draw_click_marker(x, y, timestamp)
-                else:
-                    QMetaObject.invokeMethod(self, "draw_click_marker",
-                                           Qt.QueuedConnection,
-                                           Q_ARG(int, x),
-                                           Q_ARG(int, y),
-                                           Q_ARG(str, timestamp))
-                
-                # Save verification screenshot
-                verify_path = self.screenshots_dir / f"click_verify_{timestamp}.png"
-                with mss() as sct:
-                    # Capture area around click point
-                    monitor = {"top": max(0, y - 50), 
-                             "left": max(0, x - 50),
-                             "width": 100, 
-                             "height": 100}
-                    screenshot = sct.grab(monitor)
-                    img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
-                    img.save(str(verify_path))
-                    logging.info("Saved click verification screenshot: %s", verify_path)
-            else:
-                error_msg = f"Failed to click at grid {coordinate}"
-                self.status_label.setText(error_msg)
-                logging.error(error_msg)
+                    self.draw_click_marker(x, y, None)
                 
             return success
             
         except Exception as e:
-            error_msg = f"Click execution error: {str(e)}"
-            self.status_label.setText(error_msg)
-            logging.exception(error_msg)
+            logging.error("Click execution error: %s", e)
             return False
 
     @Slot(int, int, str)
