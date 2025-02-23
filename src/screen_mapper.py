@@ -17,6 +17,7 @@ import json
 import logging
 from pathlib import Path
 import datetime
+import subprocess
 
 from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel, QScrollArea, QSizePolicy, QMessageBox, QApplication
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QThread, QMetaObject, Q_ARG, Signal, Slot
@@ -24,6 +25,7 @@ from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QFontMetrics, 
 
 from mss import mss
 from PIL import Image, ImageDraw
+import numpy as np
 
 class ClickableLabel(QLabel):
     """
@@ -78,13 +80,24 @@ class ScreenMapper(QMainWindow):
         self.actual_width = self.screen_size.width()
         self.actual_height = self.screen_size.height()
         
+        # Calculate cell dimensions
+        self.cell_width = self.actual_width // self.grid_size
+        self.cell_height = self.actual_height // self.grid_size
+        
         # Initialize screenshot timer
         self.screenshot_timer = QTimer(self)
         self.screenshot_timer.setSingleShot(True)
         self.screenshot_timer.timeout.connect(self._update_screenshot)
         
+        # Dictionary to store pre-registered click positions
+        self.click_positions = {}
+        
         self._initUI()
         logging.info("ScreenMapper initialized with screen dimensions: %dx%d", self.actual_width, self.actual_height)
+        logging.info("Cell dimensions: %dx%d", self.cell_width, self.cell_height)
+        
+        # Pre-register all grid coordinates
+        self._register_all_coordinates()
 
     def _initUI(self):
         """
@@ -337,7 +350,9 @@ class ScreenMapper(QMainWindow):
         """
         Convert a numeric column index to a two-letter label.
         For a 40x40 grid, we generate unique coordinates for all 40 columns:
-        aa, ab, ac, ..., az, ba, bb, bc, etc.
+        aa, ab, ac, ..., an (first 14 columns)
+        ba, bb, bc, ..., bn (next 14 columns)
+        etc.
 
         Args:
             index (int): The column index (0-39).
@@ -345,13 +360,14 @@ class ScreenMapper(QMainWindow):
         Returns:
             str: The corresponding two-letter label.
         """
-        if not (0 <= index < 40):
+        if not (0 <= index < self.grid_size):
             logging.error("Invalid column index: %d", index)
             return 'aa'  # Default to first column if invalid
             
-        # Calculate first and second letters
-        first_letter = chr(ord('a') + (index // 26))
-        second_letter = chr(ord('a') + (index % 26))
+        # For a 40x40 grid, we use 'a' through 'n' for both letters
+        # First 14 columns use 'a' prefix, next 14 use 'b' prefix
+        first_letter = 'a' if index < 14 else 'b'
+        second_letter = chr(ord('a') + (index % 14))
         
         label = f"{first_letter}{second_letter}"
         logging.debug("Generated column label '%s' for index %d", label, index)
@@ -433,61 +449,113 @@ class ScreenMapper(QMainWindow):
             self.save_markers()
             self.display_screenshot()
 
-    def move_mouse_to_pixel(self, x, y):
+    def move_mouse_to_pixel(self, target_x, target_y):
         """
-        Move the mouse to the specified pixel and perform a click using cliclick.
-
+        Move the mouse to a specific pixel position and click.
+        
         Args:
-            x (int): The x-coordinate.
-            y (int): The y-coordinate.
-
+            target_x (int): Target X coordinate in pixels
+            target_y (int): Target Y coordinate in pixels
+            
         Returns:
-            bool: True if successful.
+            bool: True if click was successful
         """
         try:
-            import subprocess
+            # Validate target position
+            if not (0 <= target_x < self.actual_width and 0 <= target_y < self.actual_height):
+                raise ValueError(f"Target position ({target_x}, {target_y}) is out of bounds")
             
-            # Ensure coordinates are integers and within bounds
-            x = max(0, min(int(x), self.actual_width - 1))
-            y = max(0, min(int(y), self.actual_height - 1))
+            # Log the movement attempt
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            logging.info("Moving mouse to pixel (%d, %d)", target_x, target_y)
             
-            # Log the target position and screen dimensions
-            logging.info("Screen dimensions: %dx%d", self.actual_width, self.actual_height)
-            logging.info("Moving mouse to position: (%d, %d)", x, y)
+            # First move the mouse without clicking
+            move_cmd = f"cliclick m:{target_x},{target_y}"
+            try:
+                process = subprocess.run(move_cmd, shell=True, capture_output=True, text=True, check=True)
+                logging.info("Mouse movement command executed successfully")
+            except subprocess.CalledProcessError as e:
+                raise Exception(f"Failed to move mouse: {e.stderr}")
             
-            # Use cliclick to move and click
-            # First move with detailed logging
-            move_cmd = f"cliclick m:{x},{y}"
-            logging.info("Executing move command: %s", move_cmd)
-            process = subprocess.run(move_cmd, shell=True, capture_output=True, text=True)
-            if process.returncode != 0:
-                error_msg = f"Failed to move mouse: {process.stderr}"
-                logging.error(error_msg)
-                raise Exception(error_msg)
+            # Wait for mouse movement to complete
+            time.sleep(0.2)
             
-            # Log successful move
-            logging.info("Mouse move command completed successfully")
+            # Verify mouse position
+            verify_path = self.screenshots_dir / f"position_verify_{timestamp}.png"
             
-            # Small delay to ensure move completes
-            time.sleep(0.5)
-            
-            # Then click with detailed logging
-            click_cmd = f"cliclick c:{x},{y}"
-            logging.info("Executing click command: %s", click_cmd)
-            process = subprocess.run(click_cmd, shell=True, capture_output=True, text=True)
-            if process.returncode != 0:
-                error_msg = f"Failed to click: {process.stderr}"
-                logging.error(error_msg)
-                raise Exception(error_msg)
-            
-            # Log successful click
-            logging.info("Click command completed successfully")
-            return True
-            
+            # Capture area around target position
+            with mss() as sct:
+                monitor = {"top": max(0, target_y - 50), 
+                         "left": max(0, target_x - 50),
+                         "width": 100, 
+                         "height": 100}
+                screenshot = sct.grab(monitor)
+                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                img.save(str(verify_path))
+                
+                logging.info("Position verification screenshot saved: %s", verify_path)
+                
+                # Execute the click with multiple retries if needed
+                for attempt in range(3):
+                    try:
+                        click_cmd = f"cliclick c:{target_x},{target_y}"
+                        process = subprocess.run(click_cmd, shell=True, capture_output=True, text=True, check=True)
+                        logging.info("Click successful at (%d, %d)", target_x, target_y)
+                        return True
+                    except subprocess.CalledProcessError as e:
+                        logging.warning("Click attempt %d failed: %s", attempt + 1, e.stderr)
+                        if attempt < 2:  # Only wait if we're going to retry
+                            time.sleep(0.2)
+                        else:
+                            raise Exception(f"Click failed after 3 attempts: {e.stderr}")
+                
+                raise Exception("All click attempts failed")
+                
         except Exception as e:
             error_msg = str(e)
             logging.error("Error moving mouse: %s", error_msg)
             self._update_status(f"Mouse movement error: {error_msg}")
+            return False
+
+    def adjust_mouse_position(self, dx, dy):
+        """
+        Adjust the mouse position by the specified delta values.
+        
+        Args:
+            dx (int): Horizontal adjustment in pixels (positive = right, negative = left)
+            dy (int): Vertical adjustment in pixels (positive = down, negative = up)
+        
+        Returns:
+            bool: True if adjustment was successful
+        """
+        try:
+            # Get current position
+            pos_cmd = "cliclick p"
+            process = subprocess.run(pos_cmd, shell=True, capture_output=True, text=True)
+            if process.returncode != 0:
+                raise Exception(f"Failed to get mouse position: {process.stderr}")
+            
+            current_pos = process.stdout.strip().split(",")
+            current_x = int(current_pos[0])
+            current_y = int(current_pos[1])
+            
+            # Calculate new position
+            new_x = max(0, min(current_x + dx, self.actual_width - 1))
+            new_y = max(0, min(current_y + dy, self.actual_height - 1))
+            
+            # Move to adjusted position
+            move_cmd = f"cliclick m:{new_x},{new_y}"
+            process = subprocess.run(move_cmd, shell=True, capture_output=True, text=True)
+            if process.returncode != 0:
+                raise Exception(f"Failed to adjust position: {process.stderr}")
+            
+            logging.info("Adjusted mouse position by (%d, %d) to (%d, %d)", 
+                        dx, dy, new_x, new_y)
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            logging.error("Error adjusting mouse position: %s", error_msg)
             return False
 
     def _update_status(self, message):
@@ -501,7 +569,7 @@ class ScreenMapper(QMainWindow):
 
     def _validate_coordinate_format(self, coordinate):
         """
-        Validate that a coordinate follows the expected grid format (e.g., 'aa01' to 'zz40').
+        Validate that a coordinate follows the expected grid format.
 
         Args:
             coordinate (str): The coordinate string.
@@ -511,25 +579,87 @@ class ScreenMapper(QMainWindow):
         """
         try:
             if len(coordinate) != 4:
+                logging.error("Invalid coordinate length: %s", coordinate)
                 return False
-            # First letter must be between 'a' and 'z'
-            if not ('a' <= coordinate[0] <= 'z'):
+            
+            # First letter must be 'a' or 'b'
+            if coordinate[0] not in ['a', 'b']:
+                logging.error("Invalid first letter in coordinate %s: must be 'a' or 'b'", coordinate)
                 return False
-            # Second letter must be between 'a' and 'z'
-            if not ('a' <= coordinate[1] <= 'z'):
+            
+            # Second letter must be between 'a' and 'n'
+            if not ('a' <= coordinate[1] <= 'n'):
+                logging.error("Invalid second letter in coordinate %s: must be between 'a' and 'n'", coordinate)
                 return False
+            
             # Last two characters must form a number between 01 and 40
-            num = int(coordinate[2:])
-            if not (1 <= num <= 40):
+            try:
+                num = int(coordinate[2:])
+                if not (1 <= num <= 40):
+                    logging.error("Invalid number in coordinate %s: must be between 01 and 40", coordinate)
+                    return False
+            except ValueError:
+                logging.error("Invalid number format in coordinate %s", coordinate)
                 return False
+            
+            # Additional validation for 'b' prefix
+            if coordinate[0] == 'b' and coordinate[1] > 'n':
+                logging.error("Invalid second letter for b-prefix coordinate %s: must not exceed 'n'", coordinate)
+                return False
+            
             return True
         except Exception as e:
             logging.exception("Error validating coordinate format: %s", e)
             return False
 
+    def _register_all_coordinates(self):
+        """Pre-register all possible grid coordinates and their pixel positions."""
+        try:
+            # Get current screen dimensions
+            screen = QApplication.primaryScreen()
+            if not screen:
+                logging.error("No screen detected")
+                return
+            
+            geometry = screen.geometry()
+            self.actual_width = geometry.width()
+            self.actual_height = geometry.height()
+            
+            # Calculate cell dimensions
+            cell_width = self.actual_width // self.grid_size
+            cell_height = self.actual_height // self.grid_size
+            
+            # Create screenshots directory if it doesn't exist
+            self.screenshots_dir = self.workspace_dir / "screenshots"
+            self.screenshots_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate all possible coordinates
+            self.click_positions = {}
+            
+            # Generate coordinates for both 'a' and 'b' prefixes
+            for prefix in ['a', 'b']:
+                for second_letter in [chr(ord('a') + i) for i in range(14)]:  # a through n
+                    for row in range(1, 41):
+                        coord = f"{prefix}{second_letter}{row:02d}"
+                        
+                        # Calculate column index
+                        col = (ord(prefix) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
+                        
+                        # Calculate pixel position (center of cell)
+                        x = (col * cell_width) + (cell_width // 2)
+                        y = ((row - 1) * cell_height) + (cell_height // 2)
+                        
+                        # Store in click_positions dictionary
+                        self.click_positions[coord] = (x, y)
+            
+            logging.info("Successfully pre-registered %d grid coordinates", len(self.click_positions))
+            
+        except Exception as e:
+            logging.exception("Error pre-registering coordinates: %s", e)
+
     def execute_command(self, coordinate=None):
         """
-        Execute a click command based on grid coordinates.
+        Execute a click command using pre-registered coordinates.
         """
         try:
             if coordinate is None:
@@ -550,50 +680,49 @@ class ScreenMapper(QMainWindow):
             
             # Validate grid coordinate format
             if not self._validate_coordinate_format(coordinate):
-                self.status_label.setText("Invalid grid coordinate. Format: aa01-bz40")
+                error_msg = f"Invalid grid coordinate format: {coordinate}. Must be in format aa01-na40"
+                self.status_label.setText(error_msg)
+                logging.error(error_msg)
                 return False
 
-            # Calculate column based on both letters
-            first_letter_val = ord(coordinate[0]) - ord('a')
-            second_letter_val = ord(coordinate[1]) - ord('a')
-            col = (first_letter_val * 26) + second_letter_val
-            
-            # Validate column range
-            if not (0 <= col < self.grid_size):
-                self.status_label.setText(f"Invalid column coordinate. Must be between aa and bn")
+            # Get pre-registered click position
+            if coordinate not in self.click_positions:
+                error_msg = f"Invalid coordinate: {coordinate}. Not found in registered positions."
+                self.status_label.setText(error_msg)
+                logging.error(error_msg)
                 return False
-            
-            # Calculate row (01-40 maps to 0-39)
-            try:
-                row = int(coordinate[2:]) - 1
-                if not (0 <= row < self.grid_size):
-                    self.status_label.setText(f"Row number must be between 01 and 40")
-                    return False
-            except ValueError:
-                self.status_label.setText("Invalid row number")
+                
+            x, y = self.click_positions[coordinate]
+
+            # Validate coordinates are within screen bounds
+            if x < 0 or x >= self.actual_width or y < 0 or y >= self.actual_height:
+                error_msg = f"Click position ({x}, {y}) for coordinate {coordinate} is out of screen bounds"
+                self.status_label.setText(error_msg)
+                logging.error(error_msg)
                 return False
-
-            # Calculate cell dimensions
-            cell_width = self.actual_width // self.grid_size
-            cell_height = self.actual_height // self.grid_size
-
-            # Calculate target pixel coordinates (center of the cell)
-            x = (col * cell_width) + (cell_width // 2)
-            y = (row * cell_height) + (cell_height // 2)
 
             # Log detailed information about the click
             logging.info("Grid click details:")
             logging.info("  Coordinate: %s", coordinate)
-            logging.info("  Grid position: col=%d (%s%s), row=%d", col, coordinate[0], coordinate[1], row)
-            logging.info("  Cell dimensions: %dx%d", cell_width, cell_height)
             logging.info("  Target pixel: (%d, %d)", x, y)
-            logging.info("  Screen dimensions: %dx%d", self.actual_width, self.actual_height)
+            logging.info("  Screen bounds: %dx%d", self.actual_width, self.actual_height)
+            logging.info("  Cell dimensions: %dx%d", self.actual_width // self.grid_size, self.actual_height // self.grid_size)
 
-            # Add debug message
-            self.status_label.setText(f"DEBUG: Grid {coordinate} maps to pixel ({x}, {y})")
-
-            # Execute the click
-            success = self.move_mouse_to_pixel(x, y)
+            # Move mouse to position with multiple retries
+            for attempt in range(3):
+                try:
+                    # Execute the click using pre-registered position
+                    success = self.move_mouse_to_pixel(x, y)
+                    if success:
+                        break
+                    logging.warning("Mouse movement attempt %d failed, retrying...", attempt + 1)
+                    time.sleep(0.5)  # Wait before retry
+                except Exception as e:
+                    logging.error("Mouse movement attempt %d failed: %s", attempt + 1, e)
+                    if attempt == 2:  # Last attempt
+                        raise
+                    time.sleep(0.5)  # Wait before retry
+            
             if success:
                 # Store successful coordinate for future verification steps
                 if not "verify" in coordinate.lower():
@@ -601,6 +730,7 @@ class ScreenMapper(QMainWindow):
                     logging.info("Stored successful coordinate: %s", coordinate)
                 
                 self.status_label.setText(f"Clicked grid {coordinate} at pixel ({x}, {y})")
+                
                 # Draw a temporary marker at click location
                 if QThread.currentThread() == QApplication.instance().thread():
                     self.draw_click_marker(x, y, timestamp)
@@ -610,12 +740,30 @@ class ScreenMapper(QMainWindow):
                                            Q_ARG(int, x),
                                            Q_ARG(int, y),
                                            Q_ARG(str, timestamp))
+                
+                # Save verification screenshot
+                verify_path = self.screenshots_dir / f"click_verify_{timestamp}.png"
+                with mss() as sct:
+                    # Capture area around click point
+                    monitor = {"top": max(0, y - 50), 
+                             "left": max(0, x - 50),
+                             "width": 100, 
+                             "height": 100}
+                    screenshot = sct.grab(monitor)
+                    img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                    img.save(str(verify_path))
+                    logging.info("Saved click verification screenshot: %s", verify_path)
             else:
-                self.status_label.setText(f"Failed to click grid {coordinate}")
+                error_msg = f"Failed to click at grid {coordinate}"
+                self.status_label.setText(error_msg)
+                logging.error(error_msg)
+                
             return success
+            
         except Exception as e:
-            self.status_label.setText(f"Execution error: {str(e)}")
-            logging.exception("Error executing command: %s", e)
+            error_msg = f"Click execution error: {str(e)}"
+            self.status_label.setText(error_msg)
+            logging.exception(error_msg)
             return False
 
     @Slot(int, int, str)

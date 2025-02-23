@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QMetaObject, QBuffer, Q_ARG, QByteArray
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
+from mss.factory import mss
 
 # Simulate AI models (for demonstration purposes, assume google.genai is available)
 try:
@@ -127,10 +128,14 @@ class AIController:
 
         # Define macOS hotkeys for various actions
         self.HOTKEYS = {
+            "new": ("command", "n"),
+            "open": ("command", "o"),
+            "save": ("command", "s"),
+            "close": ("command", "w"),
+            "quit": ("command", "q"),
             "copy": ("command", "c"),
             "paste": ("command", "v"),
             "cut": ("command", "x"),
-            "save": ("command", "s"),
             "undo": ("command", "z"),
             "redo": ("command", "shift", "z"),
             "select_all": ("command", "a"),
@@ -262,6 +267,26 @@ class AIController:
             "wait_for_window": self._wait_for_window,
             "verify_window_state": self._verify_window_state,
             "execute_applescript": self._execute_applescript
+        }
+
+        # Initialize hotkey map
+        self.hotkey_map = {
+            "command+n": "new",
+            "command+o": "open",
+            "command+s": "save",
+            "command+w": "close",
+            "command+q": "quit",
+            "command+c": "copy",
+            "command+v": "paste",
+            "command+x": "cut",
+            "command+z": "undo",
+            "command+shift+z": "redo",
+            "command+a": "select_all",
+            "command+f": "find",
+            "command+space": "spotlight",
+            "enter": "enter",
+            "escape": "escape",
+            "tab": "tab"
         }
 
         # Initialize UI components on the main thread
@@ -868,6 +893,26 @@ Respond with one word: SUCCESS or FAILURE.
             if command.upper() in ["SUCCESS", "FAILURE"]:
                 return command
                 
+            # First ensure Terminal is focused
+            self.execute_automation_sequence("terminal.focus_existing")
+            time.sleep(self.FOCUS_DELAY)  # Wait for focus to take effect
+                
+            # Special handling for http.server to avoid port conflicts
+            if "python" in command and "http.server" in command:
+                # Try ports 8000-8099 until we find an available one
+                import socket
+                for port in range(8000, 8100):
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    try:
+                        sock.bind(('localhost', port))
+                        sock.close()
+                        # Port is available, use it
+                        command = f"python3 -m http.server {port}"
+                        break
+                    except OSError:
+                        sock.close()
+                        continue
+                        
             workspace = self.workspace_root
             if command.startswith(("mkdir", "touch", "cp", "mv")):
                 parts = command.split()
@@ -1064,7 +1109,7 @@ Respond with one word: SUCCESS or FAILURE.
 
     def _validate_coordinate_format(self, coordinate):
         """
-        Validate that a coordinate follows the expected grid format (e.g., 'aa01' to 'zz40').
+        Validate that a coordinate follows the expected grid format.
 
         Args:
             coordinate (str): The coordinate string.
@@ -1074,17 +1119,34 @@ Respond with one word: SUCCESS or FAILURE.
         """
         try:
             if len(coordinate) != 4:
+                logging.error("Invalid coordinate length: %s", coordinate)
                 return False
-            # First letter must be between 'a' and 'z'
-            if not ('a' <= coordinate[0] <= 'z'):
+            
+            # First letter must be 'a' or 'b'
+            if coordinate[0] not in ['a', 'b']:
+                logging.error("Invalid first letter in coordinate %s: must be 'a' or 'b'", coordinate)
                 return False
-            # Second letter must be between 'a' and 'z'
-            if not ('a' <= coordinate[1] <= 'z'):
+            
+            # Second letter must be between 'a' and 'n'
+            if not ('a' <= coordinate[1] <= 'n'):
+                logging.error("Invalid second letter in coordinate %s: must be between 'a' and 'n'", coordinate)
                 return False
+            
             # Last two characters must form a number between 01 and 40
-            num = int(coordinate[2:])
-            if not (1 <= num <= 40):
+            try:
+                num = int(coordinate[2:])
+                if not (1 <= num <= 40):
+                    logging.error("Invalid number in coordinate %s: must be between 01 and 40", coordinate)
+                    return False
+            except ValueError:
+                logging.error("Invalid number format in coordinate %s", coordinate)
                 return False
+            
+            # Additional validation for 'b' prefix
+            if coordinate[0] == 'b' and coordinate[1] > 'n':
+                logging.error("Invalid second letter for b-prefix coordinate %s: must not exceed 'n'", coordinate)
+                return False
+            
             return True
         except Exception as e:
             logging.exception("Error validating coordinate format: %s", e)
@@ -1174,31 +1236,60 @@ Respond with one word: SUCCESS or FAILURE.
 
     def _resize_for_ai(self, image):
         """
-        Resize an image to a suitable size for AI processing while maintaining aspect ratio.
+        Resize an image to be suitable for AI analysis while staying under API limits.
         
         Args:
-            image (PIL.Image): The original image
+            image (PIL.Image): The image to resize
             
         Returns:
             PIL.Image: The resized image
         """
         try:
-            # Target maximum dimension (width or height) for AI processing
-            MAX_DIM = 1024
+            # Target size that keeps file size under API limits while maintaining quality
+            MAX_DIMENSION = 1024
+            MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB in bytes
+            
+            # Get current dimensions
+            width, height = image.size
+            
+            # Calculate aspect ratio
+            aspect_ratio = width / height
             
             # Calculate new dimensions maintaining aspect ratio
-            ratio = min(MAX_DIM / image.width, MAX_DIM / image.height)
-            new_width = int(image.width * ratio)
-            new_height = int(image.height * ratio)
-            
-            # Resize the image using LANCZOS resampling for better quality
+            if width > height:
+                new_width = min(width, MAX_DIMENSION)
+                new_height = int(new_width / aspect_ratio)
+            else:
+                new_height = min(height, MAX_DIMENSION)
+                new_width = int(new_height * aspect_ratio)
+                
+            # Resize image
             resized = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            logging.debug("Resized image from %dx%d to %dx%d for AI processing",
-                        image.width, image.height, new_width, new_height)
+            
+            # Convert to RGB if necessary
+            if resized.mode in ('RGBA', 'P'):
+                resized = resized.convert('RGB')
+            
+            # Check file size and compress if needed
+            quality = 95
+            while True:
+                # Save to bytes to check size
+                from io import BytesIO
+                buffer = BytesIO()
+                resized.save(buffer, format='JPEG', quality=quality)
+                size = buffer.tell()
+                
+                if size <= MAX_FILE_SIZE or quality <= 30:
+                    break
+                    
+                quality -= 5
+                
+            logging.info(f"Resized image from {width}x{height} to {new_width}x{new_height} with quality {quality}")
             return resized
+            
         except Exception as e:
             logging.exception("Error resizing image for AI: %s", e)
-            return image
+            return image  # Return original if resize fails
 
     def execute_step(self, step, retry_count=0, previous_attempts=None):
         """Execute a single automation step using the four basic action types."""
@@ -1215,6 +1306,9 @@ Respond with one word: SUCCESS or FAILURE.
             action_type = action_type.upper().strip()
             details = details.strip()
             
+            # Store current step description for verification
+            self.current_step_description = details
+            
             # Handle each action type
             if action_type == "TYPE":
                 if details == "WAIT":
@@ -1225,87 +1319,111 @@ Respond with one word: SUCCESS or FAILURE.
                     return "automation_sequence", "SUCCESS"
                     
             elif action_type == "HOTKEY":
-                hotkey_map = {
-                    "command+space": "spotlight",
-                    "enter": "enter",
-                    "escape": "escape",
-                    "tab": "tab"
-                }
-                hotkey = hotkey_map.get(details.lower())
+                # First try exact match in hotkey_map
+                hotkey = self.hotkey_map.get(details.lower())
                 if not hotkey:
-                    raise ValueError(f"Unknown hotkey: {details}")
+                    # If not found, try to normalize the hotkey format
+                    normalized = details.lower().replace(" ", "+").replace("-", "+")
+                    hotkey = self.hotkey_map.get(normalized)
+                    if not hotkey:
+                        raise ValueError(f"Unknown hotkey: {details}")
+                
                 success = self.execute_hotkey(hotkey)
                 time.sleep(0.5)  # Wait for hotkey action to complete
                 return "automation_sequence", "SUCCESS" if success else "FAILURE"
                 
             elif action_type == "CLICK":
-                # Hide any active message boxes before taking screenshots
-                if self.window:
-                    QMetaObject.invokeMethod(
-                        self.window,
-                        "hide_active_dialogs",
-                        Qt.QueuedConnection
+                # Take a screenshot for AI analysis
+                screenshot = self.capture_grid_screenshot()
+                timestamp = time.strftime("%Y%m%d_%H%M%S_%f")
+                
+                # First try to identify if there's a hotkey that could accomplish this action
+                hotkey_prompt = f"""
+Analyze this action request: "{details}"
+Is there a common keyboard shortcut/hotkey that could accomplish this action instead of clicking?
+Consider standard macOS shortcuts like:
+- Command+N for New
+- Command+O for Open
+- Command+S for Save
+- Command+W for Close
+- Command+Q for Quit
+- Command+C for Copy
+- Command+V for Paste
+- Command+X for Cut
+- Command+Z for Undo
+- Command+Shift+Z for Redo
+- Command+A for Select All
+- Command+F for Find
+- Enter for Confirm/OK
+- Escape for Cancel
+- Tab for Next Field
+
+Respond with ONLY the hotkey if one exists (e.g., "command+n"), or "NONE" if no suitable hotkey exists.
+"""
+                try:
+                    hotkey_response = self.executor.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=hotkey_prompt + "\n" + details
                     )
-                    time.sleep(0.2)
-                
-                # Force screen mapper to take a fresh screenshot
-                if self.screen_mapper:
-                    self.screen_mapper.take_screenshot()
-                    time.sleep(0.2)
-                
-                before_image = self.capture_grid_screenshot()
-                
-                # Modified prompt for click actions
-                prompt = f"""
-You are looking at a screenshot with a 40x40 grid overlay. The grid coordinates go from aa01 to an40.
-
-Your task is to find and click: "{details}"
-
-CRITICAL INSTRUCTIONS:
-1. Look carefully at the screenshot and find the EXACT element to click
-2. Respond with ONLY the grid coordinate in this format: %%%COORDINATE@@@ (e.g., %%%aa01@@@)
-3. The coordinate must be in the format aa01 to an40 (first letter always 'a', second letter 'a' to 'n', numbers 01-40)
-
-Respond with ONLY the grid coordinate in %%%COORDINATE@@@ format. No other text."""
-
-                response = self.executor.models.generate_content(
-                    model="gemini-2.0-flash", 
-                    contents=[prompt, before_image]
-                )
-                action_line = response.text.strip().lower()
-                
-                if not (action_line.startswith("%%%") and action_line.endswith("@@@")):
-                    raise ValueError(f"Invalid response format: {action_line}")
+                    suggested_hotkey = hotkey_response.text.strip().lower()
                     
-                coordinate = action_line[3:-3].strip()
-                if not self._validate_coordinate_format(coordinate):
-                    raise ValueError(f"Invalid coordinate format: {coordinate}")
+                    if suggested_hotkey != "none":
+                        # Try to normalize the suggested hotkey
+                        normalized = suggested_hotkey.replace(" ", "+").replace("-", "+")
+                        if normalized in self.hotkey_map:
+                            logging.info(f"Found hotkey alternative: {normalized} for action: {details}")
+                            success = self.execute_hotkey(self.hotkey_map[normalized])
+                            if success:
+                                return "automation_sequence", "SUCCESS"
+                    # If hotkey fails or not found, continue with normal click action
+                except Exception as e:
+                    logging.warning(f"Error checking for hotkey alternative: {e}")
                 
-                # Execute the click
-                success = self.screen_mapper.execute_command(coordinate)
-                if not success:
-                    raise ValueError(f"Failed to click at coordinate {coordinate}")
+                # If no hotkey or hotkey failed, proceed with normal click action
+                # Create AI prompt for coordinate identification
+                prompt = f"""
+Analyze this screenshot and find the target: "{details}"
+Look for:
+1. Buttons, links, or UI elements matching the description
+2. Text labels or headings that match
+3. Common UI patterns where this element might be located
+4. Icons or visual elements that represent the action
+
+Return the grid coordinate (e.g., aa01) where the target is located.
+If multiple matches exist, choose the most likely one based on context.
+If no matches are found, respond with "NOT_FOUND".
+"""
+                # Get coordinate from AI
+                response = self.executor.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[prompt, screenshot]
+                )
                 
-                time.sleep(0.2)  # Wait for click to register
+                coordinate = response.text.strip().lower()
+                if coordinate == "not_found":
+                    if retry_count < MAX_RETRIES:
+                        time.sleep(0.5)  # Wait before retry
+                        return self.execute_step(step, retry_count + 1, previous_attempts)
+                    else:
+                        raise Exception(f"Failed to find target: {details}")
                 
-                # Take after screenshot and verify
-                after_image = self.capture_grid_screenshot()
-                verification_result = self.verify_step_completion(step, before_image, after_image)
-                
-                return coordinate, verification_result
+                # Execute the click with adjustment
+                success = self.execute_click_with_adjustment(coordinate)
+                return "click", "SUCCESS" if success else "FAILURE"
                 
             elif action_type == "TERMINAL":
-                result = self.execute_command(details)
-                return "automation_sequence", "SUCCESS" if result else "FAILURE"
+                success = self.execute_command(details)
+                return "terminal", "SUCCESS" if success else "FAILURE"
                 
             else:
                 raise ValueError(f"Unknown action type: {action_type}")
                 
         except Exception as e:
+            logging.exception("Error executing step: %s", e)
             if retry_count < MAX_RETRIES:
-                time.sleep(1)
+                time.sleep(0.5)  # Wait before retry
                 return self.execute_step(step, retry_count + 1, previous_attempts)
-            raise Exception(f"Step failed: {str(e)}")
+            return "error", str(e)
 
     def save_step_screenshots(self, before, after, step, coordinate, verification, timestamp):
         """
@@ -1355,6 +1473,237 @@ Respond with ONLY the grid coordinate in %%%COORDINATE@@@ format. No other text.
             return True
         except subprocess.CalledProcessError as e:
             logging.exception("AppleScript execution failed: %s", e)
+            return False
+
+    def execute_click_with_adjustment(self, coordinate, retry_count=0, max_attempts=3):
+        """
+        Execute a click with position adjustment based on AI analysis.
+        
+        Args:
+            coordinate (str): The grid coordinate to click
+            retry_count (int): Number of retries attempted
+            max_attempts (int): Maximum number of retry attempts
+            
+        Returns:
+            bool: True if click was successful, False otherwise
+        """
+        try:
+            # Take before screenshot
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            before_path = self.screenshots_dir / f"click_{timestamp}_before.png"
+            
+            # Capture and save before screenshot
+            with mss() as sct:
+                # Get the primary monitor
+                monitor = sct.monitors[1]  # Primary monitor is usually index 1
+                
+                # Capture the entire monitor
+                screenshot = sct.grab(monitor)
+                
+                # Convert to PIL Image
+                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                
+                # Save the screenshot
+                img.save(str(before_path))
+                logging.info("Saved before screenshot to: %s", before_path)
+                
+                # Resize image for AI analysis
+                resized_before = self._resize_for_ai(img)
+            
+            # Execute the click
+            success = self.screen_mapper.execute_command(coordinate)
+            if not success:
+                logging.warning("Initial click failed")
+                return False
+                
+            # Wait for UI to update
+            time.sleep(0.5 + (retry_count * 0.2))  # Increase wait time with each retry
+            
+            # Take after screenshot
+            after_path = self.screenshots_dir / f"click_{timestamp}_after.png"
+            with mss() as sct:
+                # Capture after screenshot
+                screenshot = sct.grab(monitor)
+                img = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                img.save(str(after_path))
+                logging.info("Saved after screenshot to: %s", after_path)
+                
+                # Resize image for AI analysis
+                resized_after = self._resize_for_ai(img)
+            
+            # Create verification prompt
+            prompt = f"""
+You are analyzing two screenshots taken before and after a click action.
+The click was intended to {self.current_step_description if hasattr(self, 'current_step_description') else 'perform an action'}.
+
+Compare the screenshots and determine if the click was successful by looking for:
+1. Visual changes that indicate the click worked (e.g., button state change, menu opening, navigation)
+2. Expected UI updates based on the intended action
+3. Any error messages or unexpected states
+
+Respond with ONLY one of:
+- SUCCESS: If you see clear evidence the click worked
+- FAILURE: If you see evidence the click failed or had no effect
+- UNCLEAR: If you cannot determine the outcome
+
+Additional details can be provided after the status in parentheses.
+Example: "SUCCESS (Menu opened as expected)" or "FAILURE (No visible change)"
+"""
+            try:
+                # Send resized images to API
+                verification = self.executor.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[prompt, resized_before, resized_after]
+                )
+                
+                verification_text = verification.text.strip().upper()
+                logging.info("Click verification result: %s", verification_text)
+                
+                if "SUCCESS" in verification_text:
+                    return True
+                elif "FAILURE" in verification_text or "UNCLEAR" in verification_text:
+                    if retry_count < max_attempts - 1:
+                        logging.warning("Click failed with error, retrying...")
+                        time.sleep(0.5)  # Wait before retry
+                        return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
+                    else:
+                        logging.error("Click failed after %d attempts", max_attempts)
+                        return False
+                else:
+                    logging.warning("Unexpected verification response: %s", verification_text)
+                    return False
+                    
+            except Exception as api_error:
+                logging.error("Error during AI verification: %s", api_error)
+                # If AI verification fails, return True if the click executed successfully
+                return success
+                
+        except Exception as e:
+            logging.exception("Error in click execution: %s", e)
+            if retry_count < max_attempts - 1:
+                logging.warning("Click failed with error, retrying...")
+                time.sleep(0.5)  # Wait before retry
+                return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
+            return False
+
+    def test_click_accuracy(self):
+        """
+        Run a click accuracy test using the ScreenMapper's testing functionality.
+        Tests a set of predefined points across the screen and measures click accuracy.
+        
+        Returns:
+            dict: Test results including success rate and error measurements
+        """
+        try:
+            if not self.screen_mapper:
+                raise RuntimeError("ScreenMapper not initialized")
+                
+            # Run the accuracy test
+            results = self.screen_mapper.test_click_accuracy()
+            
+            # Log test completion
+            if results:
+                success_count = sum(1 for r in results if r.get("success", False))
+                total_points = len(results)
+                logging.info("Click accuracy test completed: %d/%d successful", 
+                           success_count, total_points)
+            else:
+                logging.warning("Click accuracy test returned no results")
+                
+            return results
+            
+        except Exception as e:
+            logging.exception("Error running click accuracy test: %s", e)
+            if self.window:
+                self.window.show_message_signal.emit(
+                    "Click Test Error",
+                    f"Failed to run click accuracy test: {str(e)}"
+                )
+            return None
+
+    def test_grid_coordinates(self):
+        """
+        Test all grid coordinates systematically to verify they are computed correctly.
+        Creates a visualization and validates each coordinate.
+        
+        Returns:
+            tuple: (list of valid coordinates, list of invalid coordinates)
+        """
+        try:
+            if not self.screen_mapper:
+                raise RuntimeError("ScreenMapper not initialized")
+                
+            # Create test visualization
+            vis_path = self.screen_mapper.create_click_test_visualization()
+            if not vis_path:
+                raise RuntimeError("Failed to create test visualization")
+                
+            # Run the grid test
+            self.screen_mapper.test_grid()
+            
+            # Get results from markers
+            valid_coords = list(self.screen_mapper.markers.keys())
+            invalid_coords = []
+            
+            # Test each coordinate
+            for row in range(1, 41):
+                for col in range(self.screen_mapper.grid_size):
+                    coord = f"{self.screen_mapper.get_column_label(col)}{row:02d}"
+                    if coord not in valid_coords:
+                        invalid_coords.append(coord)
+                        
+            logging.info("Grid coordinate test completed: %d valid, %d invalid",
+                        len(valid_coords), len(invalid_coords))
+                        
+            return valid_coords, invalid_coords
+            
+        except Exception as e:
+            logging.exception("Error testing grid coordinates: %s", e)
+            if self.window:
+                self.window.show_message_signal.emit(
+                    "Grid Test Error",
+                    f"Failed to test grid coordinates: {str(e)}"
+                )
+            return [], []
+
+    def verify_click_position(self, coordinate):
+        """
+        Verify that a click position is computed correctly for a given coordinate.
+        
+        Args:
+            coordinate (str): Grid coordinate to verify (e.g., 'aa01')
+            
+        Returns:
+            bool: True if the coordinate is valid and computes correctly
+        """
+        try:
+            if not self.screen_mapper:
+                return False
+                
+            # Validate coordinate format
+            if not self.screen_mapper._validate_coordinate_format(coordinate):
+                logging.error("Invalid coordinate format: %s", coordinate)
+                return False
+                
+            # Get click position
+            point = self.screen_mapper.get_grid_center(coordinate)
+            if not point:
+                logging.error("Failed to compute position for coordinate: %s", coordinate)
+                return False
+                
+            # Verify point is within screen bounds
+            if (point.x() < 0 or point.x() >= self.screen_mapper.actual_width or
+                point.y() < 0 or point.y() >= self.screen_mapper.actual_height):
+                logging.error("Computed position out of bounds: %s -> (%d, %d)",
+                            coordinate, point.x(), point.y())
+                return False
+                
+            logging.info("Verified click position for %s: (%d, %d)",
+                        coordinate, point.x(), point.y())
+            return True
+            
+        except Exception as e:
+            logging.exception("Error verifying click position: %s", e)
             return False
 
 # End of AIController class definition

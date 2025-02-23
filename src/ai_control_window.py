@@ -15,8 +15,169 @@ import logging
 from PySide6.QtCore import Qt, QTimer, QMetaObject, Q_ARG, Slot, Signal
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QLineEdit, QPushButton, QLabel, QTextEdit,
-                               QMessageBox, QApplication, QSizePolicy)
-from PySide6.QtCore import QThread
+                               QMessageBox, QApplication, QSizePolicy, QHBoxLayout)
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QCursor
+from PySide6.QtCore import QThread, QPoint
+
+class GridOverlayWindow(QWidget):
+    """
+    A transparent window that displays a permanent orange grid overlay.
+    The grid is 40x40 and stays on top of all windows.
+    """
+    def __init__(self):
+        super().__init__()
+        # Make the window frameless, stay on top, and transparent to mouse events
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
+        # Make the window background transparent
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        # Make the window ignore mouse events
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        # Get screen dimensions
+        screen = QApplication.primaryScreen()
+        self.screen_geometry = screen.geometry()
+        self.setGeometry(self.screen_geometry)
+        
+        # Grid properties
+        self.grid_size = 40  # 40x40 grid
+        self.cell_width = self.screen_geometry.width() // self.grid_size
+        self.cell_height = self.screen_geometry.height() // self.grid_size
+        
+        # Store current mouse position for hover effects
+        self.current_mouse_pos = None
+        
+        # Set up timer for periodic updates
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_mouse_position)
+        self.update_timer.start(100)  # Update every 100ms
+        
+        # Show the window
+        self.show()
+
+    def check_mouse_position(self):
+        """Update mouse position and trigger repaint only when position changes"""
+        new_pos = QCursor.pos()  # Use global cursor position since we're transparent to mouse events
+        if self.current_mouse_pos != new_pos:
+            self.current_mouse_pos = new_pos
+            self.update()
+
+    def get_column_label(self, index):
+        """Convert numeric index to two-letter column label (aa-na)"""
+        # Only use letters a through n
+        if index >= 14:  # After 'n', return 'na'
+            return 'na'
+        first_letter = chr(ord('a') + index)
+        second_letter = 'a'
+        return f"{first_letter}{second_letter}"
+
+    def paintEvent(self, event):
+        """Draw the semi-transparent grid overlay with cross pattern and coordinate system."""
+        try:
+            painter = QPainter(self)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # Draw all grid lines with very light opacity (10%)
+                grid_pen = QPen(QColor(255, 140, 0, 25))  # Reduced opacity for grid lines
+                grid_pen.setWidth(1)
+                painter.setPen(grid_pen)
+                
+                # Draw vertical grid lines
+                for x in range(0, self.width(), self.cell_width):
+                    painter.drawLine(x, 0, x, self.height())
+                
+                # Draw horizontal grid lines
+                for y in range(0, self.height(), self.cell_height):
+                    painter.drawLine(0, y, self.width(), y)
+                
+                # Set up font for labels with reduced opacity
+                font = QFont("Menlo", 9, QFont.Bold)  # Slightly smaller font
+                painter.setFont(font)
+                
+                # Set up text pen with orange color (40% opacity)
+                text_pen = QPen(QColor(255, 140, 0, 102))  # Reduced opacity for text
+                painter.setPen(text_pen)
+                
+                # Calculate middle Y position
+                mid_y = self.height() // 2
+                
+                # Draw letters at the bottom and middle (aa-na)
+                for i in range(self.grid_size):
+                    x = i * self.cell_width
+                    col_label = self.get_column_label(i)
+                    text_x = x + (self.cell_width - painter.fontMetrics().horizontalAdvance(col_label)) // 2
+                    
+                    # Draw at bottom with semi-transparent background
+                    self._draw_text_with_background(painter, text_x, self.height() - 15, col_label)
+                    
+                    # Draw in middle with semi-transparent background
+                    self._draw_text_with_background(painter, text_x, mid_y, col_label)
+                
+                # Draw numbers on both sides (01-40)
+                for i in range(self.grid_size):
+                    y = i * self.cell_height
+                    row_num = f"{i + 1:02d}"
+                    text_y = y + (self.cell_height + painter.fontMetrics().height()) // 2
+                    
+                    # Left side numbers with semi-transparent background
+                    self._draw_text_with_background(painter, 5, text_y, row_num)
+                    
+                    # Right side numbers with semi-transparent background
+                    text_width = painter.fontMetrics().horizontalAdvance(row_num)
+                    self._draw_text_with_background(painter, self.width() - text_width - 5, text_y, row_num)
+                
+                # Draw hover effect and coordinate display if mouse is over the grid
+                if self.current_mouse_pos:
+                    local_pos = self.mapFromGlobal(self.current_mouse_pos)
+                    col = local_pos.x() // self.cell_width
+                    row = local_pos.y() // self.cell_height
+                    
+                    if 0 <= col < self.grid_size and 0 <= row < self.grid_size:
+                        # Get coordinate in aa01 format
+                        col_label = self.get_column_label(col)
+                        row_num = f"{row + 1:02d}"
+                        coord_text = f"{col_label}{row_num}"
+                        
+                        # Highlight current cell with very light fill
+                        cell_x = col * self.cell_width
+                        cell_y = row * self.cell_height
+                        painter.fillRect(cell_x, cell_y, self.cell_width, self.cell_height, 
+                                      QColor(255, 140, 0, 32))  # Very light orange fill
+                        
+                        # Draw coordinate near cursor with enhanced visibility
+                        self._draw_text_with_background(painter, 
+                                                      local_pos.x() + 15,
+                                                      local_pos.y() - 15,
+                                                      coord_text,
+                                                      enhanced=True)
+            finally:
+                painter.end()
+        except Exception as e:
+            logging.exception("Error in paintEvent: %s", e)
+
+    def _draw_text_with_background(self, painter, x, y, text, enhanced=False):
+        """Helper method to draw text with a semi-transparent background."""
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(text)
+        text_height = metrics.height()
+        
+        # Create background rectangle
+        margin = 3
+        bg_rect = QRect(x - margin, y - text_height + margin,
+                       text_width + 2 * margin, text_height + margin)
+        
+        # Draw semi-transparent background
+        if enhanced:
+            # More visible background for hover text
+            painter.fillRect(bg_rect, QColor(0, 0, 0, 160))
+            painter.setPen(QPen(QColor(255, 140, 0, 255)))  # Full opacity for hover text
+        else:
+            # Regular semi-transparent background
+            painter.fillRect(bg_rect, QColor(0, 0, 0, 80))
+            painter.setPen(QPen(QColor(255, 140, 0, 102)))  # 40% opacity for regular text
+        
+        # Draw text
+        painter.drawText(x, y, text)
 
 class AIControlWindow(QMainWindow):
     """
@@ -45,17 +206,52 @@ class AIControlWindow(QMainWindow):
         self.update_timer.setInterval(100)  # Update every 100ms
         self.update_timer.timeout.connect(self.refresh_display)
         self.update_timer.start()
+        
+        # Create the grid overlay window
+        self.grid_overlay = GridOverlayWindow()
+        self.grid_overlay.hide()  # Hide by default
+        
         self.initUI()
         self.execute_timer = QTimer(self)
         self.execute_timer.setSingleShot(True)
         self.execute_timer.timeout.connect(self._execute_action)
-        screen_geom = self.controller.screen_mapper.screen.geometry() if self.controller.screen_mapper else None
+        screen_geom = QApplication.primaryScreen().geometry()
         if screen_geom:
             self.move(20, 20)
-        self.setMinimumSize(600, 400)  # Reduced window size since we removed screenshots
-        self.show()  # Make sure window is visible
+        self.setMinimumSize(600, 400)
+        self.show()
         logging.info("AIControlWindow initialized.")
         self.show_message_signal.connect(self._show_message_on_main_thread)
+
+    def closeEvent(self, event):
+        """Handle cleanup when the window is closed"""
+        try:
+            # Stop all timers
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
+            if hasattr(self, 'execute_timer'):
+                self.execute_timer.stop()
+            if hasattr(self, 'countdown_timer'):
+                self.countdown_timer.stop()
+                
+            # Clean up worker thread if it exists
+            if hasattr(self, 'worker') and self.worker is not None:
+                if self.worker.isRunning():
+                    self.worker.terminate()
+                    self.worker.wait()  # Wait for thread to finish
+                self.worker = None
+                
+            # Close grid overlay
+            if self.grid_overlay:
+                self.grid_overlay.close()
+                
+            # Clean up any remaining QApplication events
+            QApplication.processEvents()
+            
+        except Exception as e:
+            logging.exception("Error during window cleanup: %s", e)
+            
+        event.accept()
 
     def initUI(self):
         """
@@ -75,10 +271,48 @@ class AIControlWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
 
         # Add instruction label
-        instruction = QLabel("Enter what you want the AI to do:\n(The grid window will stay open for reference)")
+        instruction = QLabel("Enter what you want the AI to do:")
         instruction.setWordWrap(True)
         instruction.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(instruction)
+
+        # Create horizontal layout for toggle button and click testing
+        top_layout = QHBoxLayout()
+        
+        # Add grid toggle button
+        self.grid_toggle = QPushButton("Show Grid")
+        self.grid_toggle.setCheckable(True)  # Make it a toggle button
+        self.grid_toggle.setChecked(False)  # Unchecked by default
+        self.grid_toggle.clicked.connect(self.toggle_grid)
+        self.grid_toggle.setStyleSheet("""
+            QPushButton { padding: 5px 10px; }
+            QPushButton:checked { background-color: #00aa00; }
+        """)
+        top_layout.addWidget(self.grid_toggle)
+
+        # Add click testing section
+        click_test_layout = QHBoxLayout()
+        click_test_layout.setSpacing(5)
+        
+        # Add coordinate input for click testing
+        self.coord_input = QLineEdit()
+        self.coord_input.setPlaceholderText("Enter coordinate (aa01-na40)")
+        self.coord_input.setMaximumWidth(200)
+        self.coord_input.returnPressed.connect(self.execute_click)
+        click_test_layout.addWidget(self.coord_input)
+        
+        # Add execute click button
+        execute_click_btn = QPushButton("Test Click")
+        execute_click_btn.clicked.connect(self.execute_click)
+        click_test_layout.addWidget(execute_click_btn)
+        
+        top_layout.addLayout(click_test_layout)
+        
+        # Add stretch to push everything to the left
+        top_layout.addStretch()
+        
+        # Add the top layout to main layout
+        layout.addLayout(top_layout)
 
         # Add input field
         self.input_field = QLineEdit()
@@ -108,6 +342,7 @@ class AIControlWindow(QMainWindow):
             QLineEdit { padding: 8px; border: 1px solid #555555; border-radius: 3px; background-color: #363636; font-size: 14px; margin: 5px 0; }
             QPushButton { padding: 10px; background-color: #0066cc; border: none; border-radius: 3px; font-size: 14px; margin: 5px 0; }
             QPushButton:hover { background-color: #0077ee; }
+            QPushButton:checked { background-color: #00aa00; }
             QTextEdit { border: 1px solid #555555; border-radius: 3px; background-color: #363636; padding: 10px; font-family: monospace; font-size: 12px; line-height: 1.5; margin: 5px 0; }
         """)
         
@@ -335,5 +570,45 @@ class AIControlWindow(QMainWindow):
         self.status_display.append(f"? Unclear steps: {unclear}")
         self.status_display.append(f"⚠️ Errors: {errors}")
         self.input_field.setEnabled(True)
+
+    def toggle_grid(self):
+        """Toggle the grid overlay visibility"""
+        if self.grid_toggle.isChecked():
+            self.grid_overlay.show()
+            self.grid_toggle.setText("Hide Grid")
+        else:
+            self.grid_overlay.hide()
+            self.grid_toggle.setText("Show Grid")
+
+    def execute_click(self):
+        """Execute a click at the specified coordinate."""
+        if QThread.currentThread() != QApplication.instance().thread():
+            QMetaObject.invokeMethod(self, "execute_click", Qt.QueuedConnection)
+            return
+            
+        coordinate = self.coord_input.text().strip().lower()
+        if not coordinate:
+            self.status_display.append("⚠️ Please enter a coordinate")
+            return
+            
+        try:
+            # Validate coordinate format
+            if not self.controller.screen_mapper._validate_coordinate_format(coordinate):
+                self.status_display.append(f"❌ Invalid coordinate format: {coordinate}. Use format aa01-na40")
+                return
+                
+            # Execute the click
+            success = self.controller.screen_mapper.execute_command(coordinate)
+            
+            if success:
+                self.status_display.append(f"✓ Successfully clicked at coordinate {coordinate}")
+                self.coord_input.clear()  # Clear input for next coordinate
+            else:
+                self.status_display.append(f"❌ Failed to click at coordinate {coordinate}")
+                
+        except Exception as e:
+            error_msg = str(e)
+            self.status_display.append(f"❌ Error: {error_msg}")
+            logging.exception("Click execution error")
 
 # End of AIControlWindow module.
