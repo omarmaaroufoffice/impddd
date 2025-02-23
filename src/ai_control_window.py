@@ -12,12 +12,13 @@ Classes:
 import sys
 import time
 import logging
-from PySide6.QtCore import Qt, QTimer, QMetaObject, Q_ARG, Slot, Signal
+from PySide6.QtCore import (Qt, QTimer, QMetaObject, Q_ARG, Slot, Signal,
+                           QRect, QPoint, QThread)
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
-                               QLineEdit, QPushButton, QLabel, QTextEdit,
-                               QMessageBox, QApplication, QSizePolicy, QHBoxLayout)
-from PySide6.QtGui import QPainter, QColor, QPen, QFont, QCursor
-from PySide6.QtCore import QThread, QPoint
+                              QLineEdit, QPushButton, QLabel, QTextEdit,
+                              QMessageBox, QApplication, QSizePolicy, QHBoxLayout)
+from PySide6.QtGui import (QPainter, QColor, QPen, QFont, QCursor,
+                          QPixmap, QImage)
 
 class GridOverlayWindow(QWidget):
     """
@@ -26,11 +27,8 @@ class GridOverlayWindow(QWidget):
     """
     def __init__(self):
         super().__init__()
-        # Make the window frameless, stay on top, and transparent to mouse events
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
-        # Make the window background transparent
         self.setAttribute(Qt.WA_TranslucentBackground)
-        # Make the window ignore mouse events
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         
         # Get screen dimensions
@@ -50,6 +48,9 @@ class GridOverlayWindow(QWidget):
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.check_mouse_position)
         self.update_timer.start(100)  # Update every 100ms
+        
+        # Font configuration for labels
+        self.label_font = QFont("Menlo", 16, QFont.Bold)
         
         # Show the window
         self.show()
@@ -71,81 +72,83 @@ class GridOverlayWindow(QWidget):
         return f"{first_letter}{second_letter}"
 
     def paintEvent(self, event):
-        """Draw the semi-transparent grid overlay with cross pattern and coordinate system."""
+        """Draw the enhanced grid overlay with clear labels and semi-transparent cells."""
         try:
             painter = QPainter(self)
             try:
                 painter.setRenderHint(QPainter.Antialiasing)
                 
-                # Draw all grid lines with very light opacity (10%)
-                grid_pen = QPen(QColor(255, 140, 0, 25))  # Reduced opacity for grid lines
+                # Draw cell backgrounds with very light fill
+                for row in range(self.grid_size):
+                    for col in range(self.grid_size):
+                        x = col * self.cell_width
+                        y = row * self.cell_height
+                        
+                        # Alternate cell colors for better visibility
+                        if (row + col) % 2 == 0:
+                            painter.fillRect(x, y, self.cell_width, self.cell_height,
+                                          QColor(255, 140, 0, 10))  # Light orange
+                        else:
+                            painter.fillRect(x, y, self.cell_width, self.cell_height,
+                                          QColor(255, 140, 0, 5))  # Very light orange
+                
+                # Draw grid lines with increased opacity
+                grid_pen = QPen(QColor(255, 140, 0, 40))  # Increased opacity for grid lines
                 grid_pen.setWidth(1)
                 painter.setPen(grid_pen)
                 
-                # Draw vertical grid lines
-                for x in range(0, self.width(), self.cell_width):
+                # Draw vertical and horizontal grid lines
+                for i in range(self.grid_size + 1):
+                    x = i * self.cell_width
+                    y = i * self.cell_height
                     painter.drawLine(x, 0, x, self.height())
-                
-                # Draw horizontal grid lines
-                for y in range(0, self.height(), self.cell_height):
                     painter.drawLine(0, y, self.width(), y)
                 
-                # Set up font for labels with reduced opacity
-                font = QFont("Menlo", 9, QFont.Bold)  # Slightly smaller font
-                painter.setFont(font)
+                # Set up font for labels
+                painter.setFont(self.label_font)
                 
-                # Set up text pen with orange color (40% opacity)
-                text_pen = QPen(QColor(255, 140, 0, 102))  # Reduced opacity for text
-                painter.setPen(text_pen)
+                # Draw coordinate labels in each cell
+                for row in range(self.grid_size):
+                    for col in range(self.grid_size):
+                        x = col * self.cell_width
+                        y = row * self.cell_height
+                        
+                        # Calculate coordinate
+                        col_label = self.get_column_label(col)
+                        row_num = f"{row + 1:02d}"
+                        coord = f"{col_label}{row_num}"
+                        
+                        # Draw coordinate label with semi-transparent background
+                        self._draw_cell_label(painter, x, y, coord)
                 
-                # Calculate middle Y position
-                mid_y = self.height() // 2
-                
-                # Draw letters at the bottom and middle (aa-na)
-                for i in range(self.grid_size):
-                    x = i * self.cell_width
-                    col_label = self.get_column_label(i)
-                    text_x = x + (self.cell_width - painter.fontMetrics().horizontalAdvance(col_label)) // 2
-                    
-                    # Draw at bottom with semi-transparent background
-                    self._draw_text_with_background(painter, text_x, self.height() - 15, col_label)
-                    
-                    # Draw in middle with semi-transparent background
-                    self._draw_text_with_background(painter, text_x, mid_y, col_label)
-                
-                # Draw numbers on both sides (01-40)
-                for i in range(self.grid_size):
-                    y = i * self.cell_height
-                    row_num = f"{i + 1:02d}"
-                    text_y = y + (self.cell_height + painter.fontMetrics().height()) // 2
-                    
-                    # Left side numbers with semi-transparent background
-                    self._draw_text_with_background(painter, 5, text_y, row_num)
-                    
-                    # Right side numbers with semi-transparent background
-                    text_width = painter.fontMetrics().horizontalAdvance(row_num)
-                    self._draw_text_with_background(painter, self.width() - text_width - 5, text_y, row_num)
-                
-                # Draw hover effect and coordinate display if mouse is over the grid
+                # Draw hover effect if mouse is over the grid
                 if self.current_mouse_pos:
                     local_pos = self.mapFromGlobal(self.current_mouse_pos)
                     col = local_pos.x() // self.cell_width
                     row = local_pos.y() // self.cell_height
                     
                     if 0 <= col < self.grid_size and 0 <= row < self.grid_size:
+                        # Highlight current cell
+                        cell_x = col * self.cell_width
+                        cell_y = row * self.cell_height
+                        
+                        # Draw highlight rectangle
+                        highlight_pen = QPen(QColor(255, 140, 0, 255))  # Full opacity for highlight
+                        highlight_pen.setWidth(2)
+                        painter.setPen(highlight_pen)
+                        painter.drawRect(cell_x, cell_y, self.cell_width, self.cell_height)
+                        
+                        # Fill with semi-transparent color
+                        painter.fillRect(cell_x, cell_y, self.cell_width, self.cell_height,
+                                      QColor(255, 140, 0, 40))
+                        
                         # Get coordinate in aa01 format
                         col_label = self.get_column_label(col)
                         row_num = f"{row + 1:02d}"
                         coord_text = f"{col_label}{row_num}"
                         
-                        # Highlight current cell with very light fill
-                        cell_x = col * self.cell_width
-                        cell_y = row * self.cell_height
-                        painter.fillRect(cell_x, cell_y, self.cell_width, self.cell_height, 
-                                      QColor(255, 140, 0, 32))  # Very light orange fill
-                        
-                        # Draw coordinate near cursor with enhanced visibility
-                        self._draw_text_with_background(painter, 
+                        # Draw enhanced coordinate display
+                        self._draw_text_with_background(painter,
                                                       local_pos.x() + 15,
                                                       local_pos.y() - 15,
                                                       coord_text,
@@ -154,6 +157,26 @@ class GridOverlayWindow(QWidget):
                 painter.end()
         except Exception as e:
             logging.exception("Error in paintEvent: %s", e)
+
+    def _draw_cell_label(self, painter, x, y, text):
+        """Draw a coordinate label inside a cell with improved visibility."""
+        metrics = painter.fontMetrics()
+        text_width = metrics.horizontalAdvance(text)
+        text_height = metrics.height()
+        
+        # Calculate center position in cell
+        text_x = x + (self.cell_width - text_width) // 2
+        text_y = y + (self.cell_height + text_height) // 2
+        
+        # Draw semi-transparent background
+        margin = 4  # Increased margin for larger text
+        bg_rect = QRect(text_x - margin, text_y - text_height,
+                       text_width + 2 * margin, text_height + margin)
+        painter.fillRect(bg_rect, QColor(0, 0, 0, 40))
+        
+        # Draw text with improved contrast
+        painter.setPen(QPen(QColor(255, 140, 0, 153)))  # 60% opacity for better visibility
+        painter.drawText(text_x, text_y, text)
 
     def _draw_text_with_background(self, painter, x, y, text, enhanced=False):
         """Helper method to draw text with a semi-transparent background."""
@@ -226,32 +249,53 @@ class AIControlWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle cleanup when the window is closed"""
         try:
-            # Stop all timers
+            # Stop all timers first
             if hasattr(self, 'update_timer'):
                 self.update_timer.stop()
+                self.update_timer.deleteLater()
             if hasattr(self, 'execute_timer'):
                 self.execute_timer.stop()
+                self.execute_timer.deleteLater()
             if hasattr(self, 'countdown_timer'):
                 self.countdown_timer.stop()
-                
+                self.countdown_timer.deleteLater()
+            
+            # Process events to ensure timers are stopped
+            QApplication.processEvents()
+            
             # Clean up worker thread if it exists
             if hasattr(self, 'worker') and self.worker is not None:
-                if self.worker.isRunning():
-                    self.worker.terminate()
-                    self.worker.wait()  # Wait for thread to finish
-                self.worker = None
-                
-            # Close grid overlay
+                try:
+                    if self.worker.isRunning():
+                        self.worker.terminate()
+                        # Wait with timeout
+                        if not self.worker.wait(3000):  # 3 second timeout
+                            logging.warning("Worker thread did not terminate gracefully")
+                    self.worker.deleteLater()
+                    self.worker = None
+                except Exception as e:
+                    logging.error("Error cleaning up worker thread: %s", e)
+            
+            # Process events again
+            QApplication.processEvents()
+            
+            # Close grid overlay with proper cleanup
             if self.grid_overlay:
-                self.grid_overlay.close()
-                
-            # Clean up any remaining QApplication events
+                try:
+                    self.grid_overlay.hide()
+                    self.grid_overlay.close()
+                    self.grid_overlay.deleteLater()
+                except Exception as e:
+                    logging.error("Error cleaning up grid overlay: %s", e)
+            
+            # Final event processing
             QApplication.processEvents()
             
         except Exception as e:
             logging.exception("Error during window cleanup: %s", e)
-            
-        event.accept()
+        finally:
+            # Always accept the close event
+            event.accept()
 
     def initUI(self):
         """

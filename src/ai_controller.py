@@ -28,8 +28,8 @@ import re
 
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QMetaObject, QBuffer, Q_ARG, QByteArray
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QMetaObject, QBuffer, Q_ARG, QByteArray, QRect
+from PySide6.QtGui import QPainter, QPixmap, QImage, QPen, QColor, QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 from mss.factory import mss
 
@@ -64,6 +64,319 @@ except ImportError:
 
 # Import ScreenMapper from our own module (assumed to be in src directory)
 from screen_mapper import ScreenMapper
+
+class AutoTroubleshooter:
+    """
+    Automated troubleshooting system that searches for solutions when automation gets stuck.
+    Uses a combination of local knowledge base and internet searches to find and apply fixes.
+    """
+    def __init__(self, controller):
+        self.controller = controller
+        self.known_issues = {
+            "Empty text input": {
+                "fix": "skip_empty_input",
+                "description": "Skip empty text inputs and continue execution"
+            },
+            "Window not focused": {
+                "fix": "force_focus",
+                "description": "Force window focus using AppleScript"
+            },
+            "Click target not found": {
+                "fix": "retry_with_delay",
+                "description": "Retry click with increased delay"
+            }
+        }
+        self.max_search_attempts = 3
+        self.search_delay = 1.0  # seconds between searches
+        
+    def search_solution(self, error_msg, context):
+        """
+        Search for solutions to the current issue.
+        
+        Args:
+            error_msg (str): The error message
+            context (dict): Additional context about the error
+            
+        Returns:
+            dict: Solution information if found, None otherwise
+        """
+        try:
+            # First check known issues
+            for issue, solution in self.known_issues.items():
+                if issue.lower() in error_msg.lower():
+                    return solution
+                    
+            # Prepare search query
+            search_query = f"macos automation {error_msg} {context.get('action_type', '')} solution"
+            
+            # Use DuckDuckGo API for searching (privacy-focused)
+            url = f"https://api.duckduckgo.com/?q={search_query}&format=json"
+            
+            import urllib.request
+            import json
+            
+            response = urllib.request.urlopen(url)
+            data = json.loads(response.read())
+            
+            if data.get('Abstract'):
+                return {
+                    "fix": "web_solution",
+                    "description": data['Abstract'],
+                    "source": data.get('AbstractSource', 'Web Search')
+                }
+                
+            return None
+            
+        except Exception as e:
+            logging.exception("Error searching for solution: %s", e)
+            return None
+            
+    def apply_solution(self, solution, error_context):
+        """
+        Apply the found solution to the current issue.
+        
+        Args:
+            solution (dict): Solution information
+            error_context (dict): Context about the error
+            
+        Returns:
+            bool: True if solution was applied successfully
+        """
+        try:
+            if not solution:
+                return False
+                
+            fix_type = solution["fix"]
+            
+            if fix_type == "skip_empty_input":
+                return True  # Already handled in type_text
+                
+            elif fix_type == "force_focus":
+                app_name = error_context.get("app_name", "")
+                if app_name:
+                    applescript = f'''
+                    tell application "{app_name}"
+                        activate
+                        delay 0.5
+                    end tell
+                    '''
+                    return self.controller._execute_applescript(applescript)
+                    
+            elif fix_type == "retry_with_delay":
+                time.sleep(1.0)  # Increased delay
+                coordinate = error_context.get("coordinate")
+                if coordinate:
+                    return self.controller.execute_click_with_adjustment(coordinate)
+                    
+            elif fix_type == "web_solution":
+                # Log the solution for manual review
+                logging.info("Web solution found: %s", solution["description"])
+                # Try to extract and apply any AppleScript commands
+                if "applescript" in solution["description"].lower():
+                    script = self._extract_applescript(solution["description"])
+                    if script:
+                        return self.controller._execute_applescript(script)
+                        
+            return False
+            
+        except Exception as e:
+            logging.exception("Error applying solution: %s", e)
+            return False
+            
+    def _extract_applescript(self, text):
+        """Extract AppleScript commands from solution text."""
+        try:
+            import re
+            # Look for code blocks or text between specific markers
+            pattern = r"(?:```applescript|tell application)(.+?)(?:```|end tell)"
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+            return None
+        except Exception:
+            return None
+
+    def handle_error(self, error, context):
+        """
+        Main error handling method that coordinates solution search and application.
+        
+        Args:
+            error (Exception): The error that occurred
+            context (dict): Error context
+            
+        Returns:
+            bool: True if error was handled successfully
+        """
+        error_msg = str(error)
+        logging.info("Troubleshooter handling error: %s", error_msg)
+        
+        for attempt in range(self.max_search_attempts):
+            # Search for solution
+            solution = self.search_solution(error_msg, context)
+            if solution:
+                logging.info("Found solution: %s", solution["description"])
+                
+                # Try to apply the solution
+                if self.apply_solution(solution, context):
+                    logging.info("Solution applied successfully")
+                    return True
+                    
+            time.sleep(self.search_delay)
+            
+        logging.warning("No solution found after %d attempts", self.max_search_attempts)
+        return False
+
+class WaitHandler:
+    """
+    Handles various wait time formats and provides sophisticated wait time management.
+    Supports natural language time expressions and explicit time values.
+    """
+    
+    def __init__(self, controller=None):
+        self.controller = controller
+        self.time_patterns = {
+            # Basic time units
+            r'(\d+)\s*(?:second|sec|s)s?\b': lambda x: float(x),
+            r'(\d+)\s*(?:minute|min|m)s?\b': lambda x: float(x) * 60,
+            r'(\d+)\s*(?:hour|hr|h)s?\b': lambda x: float(x) * 3600,
+            
+            # Decimal values
+            r'(\d*\.\d+)\s*(?:second|sec|s)s?\b': lambda x: float(x),
+            r'(\d*\.\d+)\s*(?:minute|min|m)s?\b': lambda x: float(x) * 60,
+            
+            # Special cases
+            r'half\s*(?:a|one)?\s*(?:second|sec)': lambda x: 0.5,
+            r'quarter\s*(?:of a|of one)?\s*(?:second|sec)': lambda x: 0.25,
+            
+            # Combined formats
+            r'(\d+)\s*min(?:ute)?s?\s*(?:and|,)?\s*(\d+)\s*sec(?:ond)?s?': lambda x, y: float(x) * 60 + float(y),
+            
+            # Natural language
+            r'one second': lambda x: 1.0,
+            r'a (?:few|couple of) seconds': lambda x: 2.0,
+            r'a moment': lambda x: 1.5,
+            r'briefly': lambda x: 1.0
+        }
+        
+        # Default wait times for common operations
+        self.default_waits = {
+            'page_load': 5.0,
+            'animation': 0.5,
+            'transition': 0.3,
+            'focus': 0.2,
+            'typing': 0.05
+        }
+    
+    def parse_wait_time(self, wait_text):
+        """
+        Parse a wait time from text description.
+        
+        Args:
+            wait_text (str): Text describing the wait time (e.g., "2 seconds", "1.5 minutes")
+            
+        Returns:
+            float: Wait time in seconds
+        """
+        wait_text = wait_text.lower().strip()
+        
+        # Handle numeric input directly
+        try:
+            return float(wait_text)
+        except ValueError:
+            pass
+            
+        # Try each pattern
+        for pattern, converter in self.time_patterns.items():
+            import re
+            match = re.search(pattern, wait_text)
+            if match:
+                try:
+                    return converter(*match.groups()) if match.groups() else converter(0)
+                except Exception as e:
+                    logging.warning(f"Error converting time pattern {pattern}: {e}")
+                    continue
+        
+        # Handle special cases
+        if "wait" in wait_text:
+            return self.default_waits['animation']
+        
+        # Default fallback
+        return 1.0
+    
+    def wait_with_progress(self, duration, description=None):
+        """
+        Execute a wait with progress logging and UI feedback.
+        
+        Args:
+            duration (float): Wait time in seconds
+            description (str, optional): Description of what we're waiting for
+        """
+        try:
+            # Get reference to window if available
+            window = None
+            if hasattr(self, 'controller') and hasattr(self.controller, 'window'):
+                window = self.controller.window
+            
+            if description:
+                logging.info(f"⏳ Waiting {duration:.1f} seconds for: {description}")
+                if window:
+                    window.status_display.append(f"⏳ Waiting {duration:.1f} seconds for: {description}")
+            
+            start_time = time.time()
+            interval = min(0.5, duration / 10)  # Progress updates every 0.5s or 1/10th of duration
+            
+            while time.time() - start_time < duration:
+                elapsed = time.time() - start_time
+                remaining = duration - elapsed
+                percentage = (elapsed / duration) * 100
+                
+                # Update progress every interval
+                if remaining > interval:
+                    progress_msg = f"⏳ Progress: {percentage:.0f}% ({remaining:.1f}s remaining)"
+                    logging.debug(progress_msg)
+                    if window:
+                        window.status_display.append(progress_msg)
+                
+                # Actually sleep for the interval
+                time.sleep(interval)
+            
+            # Final progress update
+            if window:
+                window.status_display.append("✓ Wait completed")
+            logging.info("Wait completed")
+            
+        except Exception as e:
+            logging.error(f"Error during wait: {e}")
+            # Still sleep for the full duration even if progress updates fail
+            time.sleep(duration)
+
+    def get_contextual_wait_time(self, context):
+        """
+        Determine appropriate wait time based on context.
+        
+        Args:
+            context (dict): Context about the operation being performed
+            
+        Returns:
+            float: Recommended wait time in seconds
+        """
+        if not context:
+            return self.default_waits['animation']
+            
+        action_type = context.get('action_type', '').lower()
+        details = context.get('details', '').lower()
+        
+        # Adjust wait time based on context
+        if 'load' in details or 'open' in details:
+            return self.default_waits['page_load']
+        elif 'type' in action_type:
+            return self.default_waits['typing']
+        elif 'click' in action_type:
+            return self.default_waits['animation']
+        elif 'focus' in details:
+            return self.default_waits['focus']
+        
+        return self.default_waits['animation']
 
 class AIController:
     """
@@ -313,22 +626,41 @@ class AIController:
             self.screenshot_timer.setSingleShot(True)
             self.screenshot_timer.timeout.connect(self._update_screenshot_cache)
 
+            # Import here to avoid circular imports
             from screen_mapper import ScreenMapper
             self.screen_mapper = ScreenMapper()
+            
+            # Process events to prevent freezing
+            QApplication.processEvents()
+            
             # Position the ScreenMapper at a convenient location on screen
             screen_geom = QApplication.primaryScreen().geometry()
             self.screen_mapper.resize(800, 600)
             self.screen_mapper.move(screen_geom.width() - 820, 20)
             
+            # Process events again
+            QApplication.processEvents()
+            
             # Import AIControlWindow here to avoid circular imports
             from ai_control_window import AIControlWindow
             self.window = AIControlWindow(self)
             self.window.move(20, 20)
-            # Show the control window
-            self.window.show()
+            
+            # Process events before showing windows
+            QApplication.processEvents()
+            
+            # Show windows with a slight delay to prevent freezing
+            QTimer.singleShot(100, self.window.show)
+            
             logging.info("UI windows initialized successfully.")
         except Exception as e:
             logging.exception("Error initializing windows: %s", e)
+            # Clean up any partially initialized components
+            if hasattr(self, 'screen_mapper') and self.screen_mapper:
+                self.screen_mapper.close()
+            if hasattr(self, 'window') and self.window:
+                self.window.close()
+            raise
 
     def _update_screenshot_cache(self):
         """
@@ -350,23 +682,238 @@ class AIController:
     def capture_grid_screenshot(self):
         """
         Capture a screenshot with the grid overlay fused into a single image.
+        Also saves an annotated version for AI analysis tracking.
         
         Returns:
             PIL.Image: The fused screenshot with grid overlay.
         """
-        # Get the current pixmap from the screen mapper which already has the grid
-        pixmap = self.screen_mapper.image_label.pixmap()
-        if not pixmap:
-            raise ValueError("No screenshot available")
+        try:
+            if not self.screen_mapper:
+                raise ValueError("ScreenMapper not initialized")
             
-        # Convert QPixmap to PIL Image
-        image_bytes = QByteArray()
-        buffer = QBuffer(image_bytes)
-        buffer.open(QBuffer.WriteOnly)
-        pixmap.save(buffer, "PNG")
-        pil_image = Image.open(io.BytesIO(image_bytes.data()))
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            
+            # Ensure grid is visible using a timer to prevent blocking
+            def ensure_grid_visible():
+                if self.window:
+                    self.window.grid_toggle.setChecked(True)
+                    self.window.toggle_grid()
+                    time.sleep(0.2)  # Wait for grid to be fully visible
+            
+            if QThread.currentThread() == QApplication.instance().thread():
+                ensure_grid_visible()
+            else:
+                QMetaObject.invokeMethod(self.window, "toggle_grid", Qt.QueuedConnection)
+                time.sleep(0.2)  # Wait for grid to be visible
+            
+            # Process events to prevent freezing
+            QApplication.processEvents()
+            
+            # Take screenshot of entire screen using a try-finally to ensure cleanup
+            try:
+                with mss() as sct:
+                    # Get the primary monitor
+                    monitor = sct.monitors[1]  # Primary monitor
+                    screenshot = sct.grab(monitor)
+                    screen_image = Image.frombytes("RGB", screenshot.size, screenshot.rgb)
+                    
+                    # Create a QPixmap from the screen image for grid overlay
+                    qimg = QImage(screen_image.tobytes(), screen_image.width, screen_image.height, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qimg)
+                    
+                    # Create a new QPixmap for the grid overlay
+                    grid_pixmap = QPixmap(pixmap.size())
+                    grid_pixmap.fill(Qt.transparent)
+                    
+                    # Paint the grid onto the overlay pixmap
+                    painter = QPainter(grid_pixmap)
+                    try:
+                        # Draw grid using the same logic as GridOverlayWindow
+                        grid_size = 40
+                        cell_width = pixmap.width() // grid_size
+                        cell_height = pixmap.height() // grid_size
+                        
+                        # Draw cell backgrounds
+                        for row in range(grid_size):
+                            for col in range(grid_size):
+                                x = col * cell_width
+                                y = row * cell_height
+                                if (row + col) % 2 == 0:
+                                    painter.fillRect(x, y, cell_width, cell_height,
+                                                   QColor(255, 140, 0, 10))
+                                else:
+                                    painter.fillRect(x, y, cell_width, cell_height,
+                                                   QColor(255, 140, 0, 5))
+                        
+                        # Draw grid lines
+                        grid_pen = QPen(QColor(255, 140, 0, 40))
+                        grid_pen.setWidth(1)
+                        painter.setPen(grid_pen)
+                        
+                        for i in range(grid_size + 1):
+                            x = i * cell_width
+                            y = i * cell_height
+                            painter.drawLine(x, 0, x, pixmap.height())
+                            painter.drawLine(0, y, pixmap.width(), y)
+                        
+                        # Draw coordinate labels
+                        font = QFont("Menlo", 16, QFont.Bold)
+                        painter.setFont(font)
+                        
+                        for row in range(grid_size):
+                            for col in range(grid_size):
+                                x = col * cell_width
+                                y = row * cell_height
+                                
+                                # Calculate coordinate
+                                col_label = self.screen_mapper.get_column_label(col)
+                                row_num = f"{row + 1:02d}"
+                                coord = f"{col_label}{row_num}"
+                                
+                                # Draw label background
+                                metrics = painter.fontMetrics()
+                                text_width = metrics.horizontalAdvance(coord)
+                                text_height = metrics.height()
+                                text_x = x + (cell_width - text_width) // 2
+                                text_y = y + (cell_height + text_height) // 2
+                                
+                                bg_rect = QRect(text_x - 4, text_y - text_height,
+                                              text_width + 8, text_height + 4)
+                                painter.fillRect(bg_rect, QColor(0, 0, 0, 40))
+                                
+                                # Draw coordinate text
+                                painter.setPen(QPen(QColor(255, 140, 0, 153)))
+                                painter.drawText(text_x, text_y, coord)
+                    finally:
+                        painter.end()
+                    
+                    # Convert grid overlay to PIL Image
+                    buffer = QBuffer()
+                    buffer.open(QBuffer.ReadWrite)
+                    grid_pixmap.save(buffer, "PNG")
+                    grid_image = Image.open(io.BytesIO(buffer.data().data()))
+                    
+                    # Composite the grid overlay onto the screenshot
+                    fused_image = Image.alpha_composite(screen_image.convert('RGBA'), grid_image)
+                    
+                    # Save the original screenshot
+                    original_path = self.screenshots_dir / f"ai_input_{timestamp}_original.png"
+                    screen_image.save(str(original_path))
+                    
+                    # Save the fused image
+                    fused_path = self.screenshots_dir / f"ai_input_{timestamp}_fused.png"
+                    fused_image.save(str(fused_path))
+                    
+                    logging.info("Saved fused AI input screenshot: %s", fused_path)
+                    return fused_image.convert('RGB')
+            except Exception as e:
+                logging.error("Screenshot capture failed: %s", e)
+                return None
+            finally:
+                # Process events after screenshot
+                QApplication.processEvents()
+            
+        except Exception as e:
+            logging.exception("Error capturing grid screenshot: %s", e)
+            return None
+
+    def save_ai_analysis_image(self, image, coordinate=None, action_type=None, verification_result=None):
+        """
+        Save an annotated version of the image showing what the AI analyzed.
         
-        return pil_image
+        Args:
+            image (PIL.Image): The original image
+            coordinate (str, optional): The coordinate being clicked
+            action_type (str, optional): Type of action being performed
+            verification_result (str, optional): Result of verification
+        """
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            
+            # Create a copy to draw on
+            annotated = image.copy()
+            draw = ImageDraw.Draw(annotated, 'RGBA')
+            
+            # Load font
+            try:
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+                small_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
+            except:
+                font = ImageFont.load_default()
+                small_font = ImageFont.load_default()
+            
+            # Add timestamp and action info at the top
+            header_text = f"AI Analysis - {timestamp}"
+            if action_type:
+                header_text += f" - Action: {action_type}"
+            draw.rectangle([0, 0, annotated.width, 40], fill=(0, 0, 0, 180))
+            draw.text((10, 10), header_text, font=font, fill=(255, 255, 255, 255))
+            
+            if coordinate:
+                # Calculate target position
+                cell_width = self.screen_mapper.actual_width // self.screen_mapper.grid_size
+                cell_height = self.screen_mapper.actual_height // self.screen_mapper.grid_size
+                
+                # Calculate column index based on both letters
+                first_letter = coordinate[0]
+                second_letter = coordinate[1]
+                col = (ord(first_letter) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
+                row = int(coordinate[2:]) - 1
+                
+                target_x = (col * cell_width) + (cell_width // 2)
+                target_y = (row * cell_height) + (cell_height // 2)
+                
+                # Draw target highlight
+                cell_x = col * cell_width
+                cell_y = row * cell_height
+                
+                # Draw cell highlight
+                draw.rectangle([cell_x, cell_y, cell_x + cell_width, cell_y + cell_height],
+                             fill=(255, 255, 0, 64), outline=(255, 255, 0, 255), width=2)
+                
+                # Draw crosshair
+                size = 20
+                draw.line((target_x - size, target_y, target_x + size, target_y),
+                         fill=(255, 0, 0, 255), width=3)
+                draw.line((target_x, target_y - size, target_x, target_y + size),
+                         fill=(255, 0, 0, 255), width=3)
+                
+                # Draw concentric circles
+                for radius in [20, 15, 10]:
+                    draw.ellipse((target_x - radius, target_y - radius,
+                                target_x + radius, target_y + radius),
+                               outline=(255, 0, 0, 255), width=2)
+                
+                # Add coordinate label
+                coord_text = f"Target: {coordinate}"
+                draw.rectangle([cell_x, cell_y - 25, cell_x + len(coord_text) * 12, cell_y - 5],
+                             fill=(0, 0, 0, 180))
+                draw.text((cell_x + 5, cell_y - 20), coord_text,
+                         font=small_font, fill=(255, 255, 255, 255))
+            
+            # Add verification result if available
+            if verification_result:
+                result_color = (0, 255, 0, 255) if verification_result == "SUCCESS" else \
+                             (255, 165, 0, 255) if verification_result == "UNCLEAR" else \
+                             (255, 0, 0, 255)
+                draw.rectangle([0, annotated.height - 40, annotated.width, annotated.height],
+                             fill=(0, 0, 0, 180))
+                draw.text((10, annotated.height - 30),
+                         f"Verification: {verification_result}",
+                         font=font, fill=result_color)
+            
+            # Save the annotated image with "annotation" in the filename
+            suffix = f"_{coordinate}" if coordinate else ""
+            suffix += f"_{verification_result}" if verification_result else ""
+            annotated_path = self.screenshots_dir / f"annotation_{timestamp}{suffix}.png"
+            annotated.save(str(annotated_path))
+            logging.info("Saved annotated AI analysis image: %s", annotated_path)
+            
+            return annotated_path
+            
+        except Exception as e:
+            logging.exception("Error saving AI analysis image: %s", e)
+            return None
 
     def save_ai_response(self, response_type, request, response, metadata=None):
         """
@@ -461,7 +1008,7 @@ CRITICAL INSTRUCTIONS:
 
 Respond with ONLY the grid coordinate in %%%COORDINATE@@@ format. No other text."""
 
-        response = self.planner.models.generate_content(model="gemini-2.0-flash", contents=[prompt, initial_screenshot])
+        response = self.planner.models.generate_content(model="gemini-2.0-flash-thinking-exp-01-21", contents=[prompt, initial_screenshot])
         steps = []
         for line in response.text.strip().split("\n"):
             line = line.strip()
@@ -571,7 +1118,7 @@ CLICK:Send button
 
 Respond with ONLY the steps, exactly as shown in the format above. No other text."""
 
-        response = self.planner.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        response = self.planner.models.generate_content(model="gemini-2.0-flash-thinking-exp-01-21", contents=prompt)
         
         # Clean and process the response
         steps = []
@@ -626,7 +1173,7 @@ Criteria:
 - Any error messages or absence of expected visuals should result in FAILURE.
 Respond with one word: SUCCESS or FAILURE.
 """
-        response = self.executor.models.generate_content(model="gemini-2.0-flash", contents=[prompt, before_image, after_image])
+        response = self.executor.models.generate_content(model="gemini-2.0-flash-thinking-exp-01-21", contents=[prompt, before_image, after_image])
         result = response.text.strip().upper()
         if result not in ["SUCCESS", "FAILURE"]:
             result = "FAILURE"
@@ -693,43 +1240,77 @@ Respond with one word: SUCCESS or FAILURE.
 
     def type_text(self, text):
         """
-        Simulate typing text using AppleScript with proper character escaping and delays.
+        Handle text input, using direct file editing for code and simulated typing for UI interaction.
 
         Args:
-            text (str): The text to be typed.
+            text (str): The text to be handled.
 
         Returns:
-            bool: True if the command executed successfully.
+            bool: True if the operation was successful.
         """
         try:
+            # Input validation
+            if not isinstance(text, str):
+                logging.warning("Invalid input type: %s, expected string", type(text))
+                return False
+                
             # Clean the input text - remove quotes and extra whitespace
             text = text.strip().strip('"').strip("'").strip()
             if not text:
-                raise ValueError("Empty text input")
+                logging.info("Empty text input received, skipping typing")
+                return True  # Return success for empty input rather than raising error
                 
-            # Escape special characters for AppleScript
-            escaped_text = text.replace('"', '\\"').replace('\\', '\\\\')
+            # Check if this is code (contains common programming constructs)
+            code_indicators = [
+                "def ", "class ", "import ", "from ", "#",
+                "function", "{", "}", "=>", "return",
+                "if ", "for ", "while ", "try:", "except:",
+                ".py", ".js", ".ts", ".html", ".css"
+            ]
             
-            # Create the AppleScript command
-            applescript = f'''
-            tell application "System Events"
-                delay {self.ACTION_DELAY}
-                keystroke "{escaped_text}"
-                delay {self.TYPE_DELAY}
-            end tell
-            '''
+            is_code = any(indicator in text for indicator in code_indicators)
             
-            # Execute the AppleScript
-            subprocess.run(["osascript", "-e", applescript], check=True)
-            logging.debug("Typed text successfully: %s", text)
-            return True
+            if is_code:
+                # Use edit_file for code
+                from pathlib import Path
+                # Determine the file type and create appropriate filename
+                file_ext = ".py"  # default to Python
+                if ".js" in text: file_ext = ".js"
+                elif ".ts" in text: file_ext = ".ts"
+                elif ".html" in text: file_ext = ".html"
+                elif ".css" in text: file_ext = ".css"
+                
+                target_file = Path(self.workspace_root) / f"current_edit{file_ext}"
+                
+                # Write the code to file
+                with open(target_file, 'w') as f:
+                    f.write(text + '\n')
+                logging.info("Code written to file: %s", target_file)
+                return True
+            else:
+                # Use AppleScript for UI interaction
+                if text.isspace() or not text:  # Additional check for whitespace-only input
+                    logging.info("Whitespace-only input received, skipping typing")
+                    return True
+                    
+                escaped_text = text.replace('"', '\\"').replace('\\', '\\\\')
+                applescript = f'''
+                tell application "System Events"
+                    delay {self.ACTION_DELAY}
+                    keystroke "{escaped_text}"
+                    delay {self.TYPE_DELAY}
+                end tell
+                '''
+                subprocess.run(["osascript", "-e", applescript], check=True)
+                logging.debug("Typed text successfully: %s", text)
+                return True
             
         except subprocess.CalledProcessError as e:
             logging.exception("Failed to type text: %s", e)
-            raise Exception(f"Failed to type text: {str(e)}")
+            return False  # Return False instead of raising exception
         except Exception as e:
             logging.exception("Error in type_text: %s", e)
-            raise Exception(f"Error typing text: {str(e)}")
+            return False  # Return False instead of raising exception
 
     def execute_hotkey(self, hotkey_name):
         """
@@ -1172,8 +1753,13 @@ Respond with one word: SUCCESS or FAILURE.
             # Calculate target pixel position
             cell_width = self.screen_mapper.actual_width // self.screen_mapper.grid_size
             cell_height = self.screen_mapper.actual_height // self.screen_mapper.grid_size
-            col = ord(coordinate[1]) - ord("a")
+            
+            # Calculate column index based on both letters
+            first_letter = coordinate[0]
+            second_letter = coordinate[1]
+            col = (ord(first_letter) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
             row = int(coordinate[2:]) - 1
+            
             target_x = (col * cell_width) + (cell_width // 2)
             target_y = (row * cell_height) + (cell_height // 2)
             
@@ -1225,8 +1811,8 @@ Respond with one word: SUCCESS or FAILURE.
                 draw.text((10, y_offset), text, fill=(255, 255, 255, 255), font=font)
                 y_offset += text_height + 10
             
-            # Save the marked image
-            save_path = os.path.join(self.screenshots_dir, f"click_target_{timestamp}.png")
+            # Save the marked image with "annotation" in the filename
+            save_path = os.path.join(self.screenshots_dir, f"annotation_click_{timestamp}.png")
             marked_image.save(save_path)
             logging.info("Saved click target screenshot to %s", save_path)
             return save_path
@@ -1298,6 +1884,14 @@ Respond with one word: SUCCESS or FAILURE.
             previous_attempts = []
             
         try:
+            # Initialize troubleshooter if needed
+            if not hasattr(self, 'troubleshooter'):
+                self.troubleshooter = AutoTroubleshooter(self)
+                
+            # Initialize wait handler if needed
+            if not hasattr(self, 'wait_handler'):
+                self.wait_handler = WaitHandler(controller=self)
+            
             # Split the step into action type and details
             if ":" not in step:
                 raise ValueError(f"Invalid step format: {step}")
@@ -1309,36 +1903,84 @@ Respond with one word: SUCCESS or FAILURE.
             # Store current step description for verification
             self.current_step_description = details
             
-            # Handle each action type
-            if action_type == "TYPE":
-                if details == "WAIT":
-                    time.sleep(1.0)
-                    return "automation_sequence", "SUCCESS"
-                else:
-                    self.type_text(details)
-                    return "automation_sequence", "SUCCESS"
+            # Create error context
+            error_context = {
+                "action_type": action_type,
+                "details": details,
+                "retry_count": retry_count
+            }
+            
+            try:
+                # Take initial screenshot for AI analysis
+                initial_screenshot = self.capture_grid_screenshot()
+                
+                # Handle each action type
+                if action_type == "TYPE":
+                    # Save screenshot with action annotation
+                    if initial_screenshot:
+                        self.save_ai_analysis_image(initial_screenshot, action_type="TYPE", 
+                                                  verification_result="ATTEMPT")
                     
-            elif action_type == "HOTKEY":
-                # First try exact match in hotkey_map
-                hotkey = self.hotkey_map.get(details.lower())
-                if not hotkey:
-                    # If not found, try to normalize the hotkey format
-                    normalized = details.lower().replace(" ", "+").replace("-", "+")
-                    hotkey = self.hotkey_map.get(normalized)
+                    # Enhanced wait handling
+                    if details.lower().startswith("wait"):
+                        wait_spec = details[4:].strip() if len(details) > 4 else ""
+                        if wait_spec:
+                            # Parse the wait time from the specification
+                            wait_time = self.wait_handler.parse_wait_time(wait_spec)
+                            description = f"Explicit wait requested: {wait_spec}"
+                        else:
+                            # Get contextual wait time if no specific time given
+                            wait_time = self.wait_handler.get_contextual_wait_time(error_context)
+                            description = "Default wait period"
+                            
+                        # Execute the wait with progress updates
+                        self.wait_handler.wait_with_progress(wait_time, description)
+                        return "automation_sequence", "SUCCESS"
+                    elif details.startswith("file:"):
+                        # Handle file editing
+                        file_path = details[5:].strip()  # Remove "file:" prefix
+                        from pathlib import Path
+                        target_file = Path(self.workspace_root) / file_path
+                        
+                        # Use edit_file tool for direct file editing
+                        if target_file.exists():
+                            with open(target_file, 'a') as f:  # Append mode
+                                f.write(details + '\n')
+                            return "file_edit", "SUCCESS"
+                        else:
+                            with open(target_file, 'w') as f:  # Create new file
+                                f.write(details + '\n')
+                            return "file_edit", "SUCCESS"
+                    else:
+                        # For terminal or text input, use type_text
+                        success = self.type_text(details)
+                        return "automation_sequence", "SUCCESS" if success else "FAILURE"
+                    
+                elif action_type == "HOTKEY":
+                    # First try exact match in hotkey_map
+                    hotkey = self.hotkey_map.get(details.lower())
                     if not hotkey:
-                        raise ValueError(f"Unknown hotkey: {details}")
-                
-                success = self.execute_hotkey(hotkey)
-                time.sleep(0.5)  # Wait for hotkey action to complete
-                return "automation_sequence", "SUCCESS" if success else "FAILURE"
-                
-            elif action_type == "CLICK":
-                # Take a screenshot for AI analysis
-                screenshot = self.capture_grid_screenshot()
-                timestamp = time.strftime("%Y%m%d_%H%M%S_%f")
-                
-                # First try to identify if there's a hotkey that could accomplish this action
-                hotkey_prompt = f"""
+                        # If not found, try to normalize the hotkey format
+                        normalized = details.lower().replace(" ", "+").replace("-", "+")
+                        hotkey = self.hotkey_map.get(normalized)
+                        if not hotkey:
+                            raise ValueError(f"Unknown hotkey: {details}")
+                    
+                    success = self.execute_hotkey(hotkey)
+                    # Use wait handler for post-hotkey delay
+                    self.wait_handler.wait_with_progress(
+                        self.wait_handler.default_waits['transition'],
+                        "Waiting for hotkey action to complete"
+                    )
+                    return "automation_sequence", "SUCCESS" if success else "FAILURE"
+                    
+                elif action_type == "CLICK":
+                    # Take a screenshot for AI analysis
+                    screenshot = self.capture_grid_screenshot()
+                    timestamp = time.strftime("%Y%m%d_%H%M%S_%f")
+                    
+                    # First try to identify if there's a hotkey that could accomplish this action
+                    hotkey_prompt = f"""
 Analyze this action request: "{details}"
 Is there a common keyboard shortcut/hotkey that could accomplish this action instead of clicking?
 Consider standard macOS shortcuts like:
@@ -1360,28 +2002,33 @@ Consider standard macOS shortcuts like:
 
 Respond with ONLY the hotkey if one exists (e.g., "command+n"), or "NONE" if no suitable hotkey exists.
 """
-                try:
-                    hotkey_response = self.executor.models.generate_content(
-                        model="gemini-2.0-flash",
-                        contents=hotkey_prompt + "\n" + details
-                    )
-                    suggested_hotkey = hotkey_response.text.strip().lower()
+                    try:
+                        hotkey_response = self.executor.models.generate_content(
+                            model="gemini-2.0-flash-thinking-exp-01-21",
+                            contents=hotkey_prompt + "\n" + details
+                        )
+                        suggested_hotkey = hotkey_response.text.strip().lower()
+                        
+                        if suggested_hotkey != "none":
+                            # Try to normalize the suggested hotkey
+                            normalized = suggested_hotkey.replace(" ", "+").replace("-", "+")
+                            if normalized in self.hotkey_map:
+                                logging.info(f"Found hotkey alternative: {normalized} for action: {details}")
+                                success = self.execute_hotkey(self.hotkey_map[normalized])
+                                if success:
+                                    # Use wait handler for post-hotkey delay
+                                    self.wait_handler.wait_with_progress(
+                                        self.wait_handler.default_waits['transition'],
+                                        "Waiting for hotkey action to complete"
+                                    )
+                                    return "automation_sequence", "SUCCESS"
+                        # If hotkey fails or not found, continue with normal click action
+                    except Exception as e:
+                        logging.warning(f"Error checking for hotkey alternative: {e}")
                     
-                    if suggested_hotkey != "none":
-                        # Try to normalize the suggested hotkey
-                        normalized = suggested_hotkey.replace(" ", "+").replace("-", "+")
-                        if normalized in self.hotkey_map:
-                            logging.info(f"Found hotkey alternative: {normalized} for action: {details}")
-                            success = self.execute_hotkey(self.hotkey_map[normalized])
-                            if success:
-                                return "automation_sequence", "SUCCESS"
-                    # If hotkey fails or not found, continue with normal click action
-                except Exception as e:
-                    logging.warning(f"Error checking for hotkey alternative: {e}")
-                
-                # If no hotkey or hotkey failed, proceed with normal click action
-                # Create AI prompt for coordinate identification
-                prompt = f"""
+                    # If no hotkey or hotkey failed, proceed with normal click action
+                    # Create AI prompt for coordinate identification
+                    prompt = f"""
 Analyze this screenshot and find the target: "{details}"
 Look for:
 1. Buttons, links, or UI elements matching the description
@@ -1389,40 +2036,71 @@ Look for:
 3. Common UI patterns where this element might be located
 4. Icons or visual elements that represent the action
 
-Return the grid coordinate (e.g., aa01) where the target is located.
-If multiple matches exist, choose the most likely one based on context.
-If no matches are found, respond with "NOT_FOUND".
+IMPORTANT: Return ONLY the grid coordinate in the exact format aa01 to na40, where:
+- First letter must be 'a'
+- Second letter must be between 'a' and 'n'
+- Numbers must be between 01 and 40
+- NO JSON, NO extra text, ONLY the coordinate
+
+If no matches are found, respond with "NOT_FOUND"
 """
-                # Get coordinate from AI
-                response = self.executor.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=[prompt, screenshot]
-                )
+                    # Get coordinate from AI
+                    response = self.executor.models.generate_content(
+                        model="gemini-2.0-flash-thinking-exp-01-21",
+                        contents=[prompt, screenshot]
+                    )
+                    
+                    coordinate = response.text.strip().lower()
+                    
+                    # Clean up the coordinate - remove any JSON or extra text
+                    import re
+                    coord_match = re.search(r'[a-n][a-n]\d{2}', coordinate)
+                    if coord_match:
+                        coordinate = coord_match.group(0)
+                        # Save screenshot with target annotation
+                        if screenshot:
+                            self.save_ai_analysis_image(screenshot, coordinate=coordinate,
+                                                      action_type="CLICK_TARGET")
+                    
+                    # Validate the coordinate format
+                    if not self.screen_mapper._validate_coordinate_format(coordinate):
+                        if retry_count < MAX_RETRIES:
+                            logging.warning(f"Invalid coordinate format: {coordinate}, retrying...")
+                            return self.execute_step(step, retry_count + 1, previous_attempts)
+                        else:
+                            raise ValueError(f"Invalid coordinate format: {coordinate}")
+                    
+                    # Execute the click with adjustment
+                    success = self.execute_click_with_adjustment(coordinate)
+                    return "click", "SUCCESS" if success else "FAILURE"
+                    
+                elif action_type == "TERMINAL":
+                    success = self.execute_command(details)
+                    return "terminal", "SUCCESS" if success else "FAILURE"
+                    
+                else:
+                    raise ValueError(f"Unknown action type: {action_type}")
                 
-                coordinate = response.text.strip().lower()
-                if coordinate == "not_found":
-                    if retry_count < MAX_RETRIES:
-                        time.sleep(0.5)  # Wait before retry
-                        return self.execute_step(step, retry_count + 1, previous_attempts)
-                    else:
-                        raise Exception(f"Failed to find target: {details}")
+            except Exception as e:
+                # Try automated troubleshooting
+                if self.troubleshooter.handle_error(e, error_context):
+                    # If troubleshooter fixed the issue, retry the step
+                    return self.execute_step(step, retry_count, previous_attempts)
                 
-                # Execute the click with adjustment
-                success = self.execute_click_with_adjustment(coordinate)
-                return "click", "SUCCESS" if success else "FAILURE"
+                # If troubleshooting failed and we haven't exceeded retries
+                if retry_count < MAX_RETRIES:
+                    # Use wait handler for retry delay
+                    self.wait_handler.wait_with_progress(
+                        self.wait_handler.default_waits['animation'],
+                        "Waiting before retry"
+                    )
+                    return self.execute_step(step, retry_count + 1, previous_attempts)
                 
-            elif action_type == "TERMINAL":
-                success = self.execute_command(details)
-                return "terminal", "SUCCESS" if success else "FAILURE"
-                
-            else:
-                raise ValueError(f"Unknown action type: {action_type}")
+                # If all retries and troubleshooting failed
+                return "error", str(e)
                 
         except Exception as e:
             logging.exception("Error executing step: %s", e)
-            if retry_count < MAX_RETRIES:
-                time.sleep(0.5)  # Wait before retry
-                return self.execute_step(step, retry_count + 1, previous_attempts)
             return "error", str(e)
 
     def save_step_screenshots(self, before, after, step, coordinate, verification, timestamp):
@@ -1440,8 +2118,9 @@ If no matches are found, respond with "NOT_FOUND".
         annotated_before = before.copy()
         draw_before = ImageDraw.Draw(annotated_before)
         draw_before.text((10, 10), f"Step: {step}\nBefore", fill=(255, 0, 0))
-        before_path = self.screenshots_dir / f"step_{timestamp}_before.png"
+        before_path = self.screenshots_dir / f"annotation_step_{timestamp}_before.png"
         annotated_before.save(before_path, optimize=True, quality=85)
+        
         annotated_after = after.copy()
         draw_after = ImageDraw.Draw(annotated_after)
         cell_width = after.width // 40
@@ -1455,7 +2134,7 @@ If no matches are found, respond with "NOT_FOUND".
         draw_after.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=3)
         draw_after.rectangle([x1+1, y1+1, x2-1, y2-1], fill=(255, 0, 0, 64))
         draw_after.text((10, 10), f"Step: {step}\nAfter - {verification}\nCoordinate: {coordinate}", fill=(255, 0, 0))
-        after_path = self.screenshots_dir / f"step_{timestamp}_after.png"
+        after_path = self.screenshots_dir / f"annotation_step_{timestamp}_after.png"
         annotated_after.save(after_path, optimize=True, quality=85)
 
     def _execute_applescript(self, script, **kwargs):
@@ -1516,8 +2195,22 @@ If no matches are found, respond with "NOT_FOUND".
                 logging.warning("Initial click failed")
                 return False
                 
-            # Wait for UI to update
-            time.sleep(0.5 + (retry_count * 0.2))  # Increase wait time with each retry
+            # Wait for UI to update - increase wait time based on context
+            base_wait = 0.5
+            context_wait = 0.0
+            
+            # Add context-based wait times
+            if hasattr(self, 'current_step_description'):
+                desc = self.current_step_description.lower()
+                if any(term in desc for term in ['menu', 'dropdown', 'list']):
+                    context_wait += 0.3  # Menus/dropdowns need more time
+                if any(term in desc for term in ['load', 'open', 'start']):
+                    context_wait += 0.5  # Loading/opening actions need more time
+                if any(term in desc for term in ['save', 'create', 'new']):
+                    context_wait += 0.4  # Save/create actions need more time
+            
+            total_wait = base_wait + context_wait + (retry_count * 0.2)
+            time.sleep(total_wait)
             
             # Take after screenshot
             after_path = self.screenshots_dir / f"click_{timestamp}_after.png"
@@ -1533,56 +2226,90 @@ If no matches are found, respond with "NOT_FOUND".
             
             # Create verification prompt
             prompt = f"""
-You are analyzing two screenshots taken before and after a click action.
-The click was intended to {self.current_step_description if hasattr(self, 'current_step_description') else 'perform an action'}.
+You are a strict verification system analyzing two screenshots taken before and after a click action.
+The click was intended to: {self.current_step_description if hasattr(self, 'current_step_description') else 'perform an action'}
 
-Compare the screenshots and determine if the click was successful by looking for:
-1. Visual changes that indicate the click worked (e.g., button state change, menu opening, navigation)
-2. Expected UI updates based on the intended action
-3. Any error messages or unexpected states
+CRITICAL REQUIREMENTS for SUCCESS:
+1. There MUST be clear, visible changes between the before and after screenshots that match the intended action
+2. The changes MUST be in the expected location/region of the click
+3. The changes MUST make sense for the intended action
+4. There must be NO error messages or unexpected states
+5. The UI must be in a stable state (no partial animations or loading indicators)
+
+Common changes to look for:
+- Button state changes (pressed, highlighted, activated)
+- Menu or dropdown opening/closing
+- New windows or dialogs appearing
+- Navigation to new pages/views
+- Text or content updates
+- Selection state changes
+- Focus changes
+
+IMPORTANT: Default to FAILURE unless you are CERTAIN the action succeeded.
 
 Respond with ONLY one of:
-- SUCCESS: If you see clear evidence the click worked
-- FAILURE: If you see evidence the click failed or had no effect
-- UNCLEAR: If you cannot determine the outcome
+- SUCCESS (Details about what specific changes were observed)
+- FAILURE (Reason why it failed or what was missing)
+- UNCLEAR (Specific reason why the outcome cannot be determined)
 
-Additional details can be provided after the status in parentheses.
-Example: "SUCCESS (Menu opened as expected)" or "FAILURE (No visible change)"
+Example responses:
+"SUCCESS (Button changed to pressed state and menu opened)"
+"FAILURE (No visible changes observed in UI)"
+"UNCLEAR (View partially obscured by animation)"
 """
             try:
-                # Send resized images to API
+                # Send resized images to AI for verification
                 verification = self.executor.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-2.0-flash-thinking-exp-01-21",
                     contents=[prompt, resized_before, resized_after]
                 )
                 
                 verification_text = verification.text.strip().upper()
                 logging.info("Click verification result: %s", verification_text)
                 
-                if "SUCCESS" in verification_text:
+                # Extract the details from the response
+                match = re.match(r"(SUCCESS|FAILURE|UNCLEAR)\s*\((.*?)\)", verification_text)
+                if match:
+                    status, details = match.groups()
+                    logging.info("Verification details: %s - %s", status, details)
+                else:
+                    status = "UNCLEAR"
+                    details = "Could not parse verification response"
+                    logging.warning("Could not parse verification response: %s", verification_text)
+                
+                if status == "SUCCESS":
+                    # Log the successful verification details
+                    logging.info("Click verified successful: %s", details)
                     return True
-                elif "FAILURE" in verification_text or "UNCLEAR" in verification_text:
+                elif status in ["FAILURE", "UNCLEAR"]:
                     if retry_count < max_attempts - 1:
-                        logging.warning("Click failed with error, retrying...")
-                        time.sleep(0.5)  # Wait before retry
+                        # Log the retry attempt
+                        logging.warning("Click verification failed (%s: %s), retrying...", status, details)
+                        # Increase wait time for next attempt
+                        time.sleep(0.5 + (retry_count * 0.3))
                         return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
                     else:
-                        logging.error("Click failed after %d attempts", max_attempts)
+                        # Log the final failure
+                        logging.error("Click failed after %d attempts. Last status: %s - %s", 
+                                    max_attempts, status, details)
                         return False
                 else:
-                    logging.warning("Unexpected verification response: %s", verification_text)
+                    logging.warning("Unexpected verification status: %s", status)
                     return False
                     
             except Exception as api_error:
                 logging.error("Error during AI verification: %s", api_error)
-                # If AI verification fails, return True if the click executed successfully
-                return success
+                if retry_count < max_attempts - 1:
+                    logging.warning("Verification error, retrying...")
+                    time.sleep(0.5)
+                    return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
+                return False
                 
         except Exception as e:
             logging.exception("Error in click execution: %s", e)
             if retry_count < max_attempts - 1:
                 logging.warning("Click failed with error, retrying...")
-                time.sleep(0.5)  # Wait before retry
+                time.sleep(0.5)
                 return self.execute_click_with_adjustment(coordinate, retry_count + 1, max_attempts)
             return False
 
