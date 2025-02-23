@@ -851,23 +851,24 @@ class AIController:
             
             if coordinate:
                 # Calculate target position
-                cell_width = self.screen_mapper.actual_width // self.screen_mapper.grid_size
-                cell_height = self.screen_mapper.actual_height // self.screen_mapper.grid_size
+                cell_width = image.width // 40  # Grid is always 40x40
+                cell_height = image.height // 40
                 
-                # Calculate column index based on both letters
+                # Calculate column index based on coordinate
                 first_letter = coordinate[0]
                 second_letter = coordinate[1]
                 col = (ord(first_letter) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
                 row = int(coordinate[2:]) - 1
                 
-                target_x = (col * cell_width) + (cell_width // 2)
-                target_y = (row * cell_height) + (cell_height // 2)
+                # Calculate target center position
+                target_x = col * cell_width + (cell_width // 2)
+                target_y = row * cell_height + (cell_height // 2)
                 
                 # Draw target highlight
                 cell_x = col * cell_width
                 cell_y = row * cell_height
                 
-                # Draw cell highlight
+                # Draw cell highlight with semi-transparent fill
                 draw.rectangle([cell_x, cell_y, cell_x + cell_width, cell_y + cell_height],
                              fill=(255, 255, 0, 64), outline=(255, 255, 0, 255), width=2)
                 
@@ -884,12 +885,19 @@ class AIController:
                                 target_x + radius, target_y + radius),
                                outline=(255, 0, 0, 255), width=2)
                 
-                # Add coordinate label
+                # Add coordinate label with improved visibility
                 coord_text = f"Target: {coordinate}"
-                draw.rectangle([cell_x, cell_y - 25, cell_x + len(coord_text) * 12, cell_y - 5],
+                text_bbox = draw.textbbox((0, 0), coord_text, font=small_font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+                
+                # Draw label background
+                margin = 4
+                draw.rectangle([cell_x, cell_y - text_height - margin * 2,
+                              cell_x + text_width + margin * 2, cell_y - margin],
                              fill=(0, 0, 0, 180))
-                draw.text((cell_x + 5, cell_y - 20), coord_text,
-                         font=small_font, fill=(255, 255, 255, 255))
+                draw.text((cell_x + margin, cell_y - text_height - margin),
+                         coord_text, font=small_font, fill=(255, 255, 255, 255))
             
             # Add verification result if available
             if verification_result:
@@ -902,7 +910,7 @@ class AIController:
                          f"Verification: {verification_result}",
                          font=font, fill=result_color)
             
-            # Save the annotated image with "annotation" in the filename
+            # Save the annotated image
             suffix = f"_{coordinate}" if coordinate else ""
             suffix += f"_{verification_result}" if verification_result else ""
             annotated_path = self.screenshots_dir / f"annotation_{timestamp}{suffix}.png"
@@ -1751,17 +1759,18 @@ Respond with one word: SUCCESS or FAILURE.
             draw = ImageDraw.Draw(marked_image, 'RGBA')
             
             # Calculate target pixel position
-            cell_width = self.screen_mapper.actual_width // self.screen_mapper.grid_size
-            cell_height = self.screen_mapper.actual_height // self.screen_mapper.grid_size
+            cell_width = image.width // 40  # Grid is always 40x40
+            cell_height = image.height // 40
             
-            # Calculate column index based on both letters
+            # Calculate column index based on coordinate
             first_letter = coordinate[0]
             second_letter = coordinate[1]
             col = (ord(first_letter) - ord('a')) * 14 + (ord(second_letter) - ord('a'))
             row = int(coordinate[2:]) - 1
             
-            target_x = (col * cell_width) + (cell_width // 2)
-            target_y = (row * cell_height) + (cell_height // 2)
+            # Calculate target center position
+            target_x = col * cell_width + (cell_width // 2)
+            target_y = row * cell_height + (cell_height // 2)
             
             # Highlight the target grid cell
             cell_x = col * cell_width
@@ -1811,7 +1820,7 @@ Respond with one word: SUCCESS or FAILURE.
                 draw.text((10, y_offset), text, fill=(255, 255, 255, 255), font=font)
                 y_offset += text_height + 10
             
-            # Save the marked image with "annotation" in the filename
+            # Save the marked image
             save_path = os.path.join(self.screenshots_dir, f"annotation_click_{timestamp}.png")
             marked_image.save(save_path)
             logging.info("Saved click target screenshot to %s", save_path)
