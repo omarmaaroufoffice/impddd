@@ -1,0 +1,133 @@
+{
+  "results": [
+    {
+      "coordinate": "aa01",
+      "position": "Top Left",
+      "intended_x": 21,
+      "intended_y": 13,
+      "actual_x": 21,
+      "actual_y": 13,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232423_981781",
+      "success": true
+    },
+    {
+      "coordinate": "an01",
+      "position": "Top Right",
+      "intended_x": 580,
+      "intended_y": 13,
+      "actual_x": 580,
+      "actual_y": 13,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232428_011477",
+      "success": true
+    },
+    {
+      "coordinate": "aa20",
+      "position": "Middle Left",
+      "intended_x": 21,
+      "intended_y": 526,
+      "actual_x": 21,
+      "actual_y": 526,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232430_731858",
+      "success": true
+    },
+    {
+      "coordinate": "ah20",
+      "position": "Center",
+      "intended_x": 322,
+      "intended_y": 526,
+      "actual_x": 322,
+      "actual_y": 526,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232433_442313",
+      "success": true
+    },
+    {
+      "coordinate": "an20",
+      "position": "Middle Right",
+      "intended_x": 580,
+      "intended_y": 526,
+      "actual_x": 580,
+      "actual_y": 526,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232436_145075",
+      "success": true
+    },
+    {
+      "coordinate": "aa40",
+      "position": "Bottom Left",
+      "intended_x": 21,
+      "intended_y": 1066,
+      "actual_x": 21,
+      "actual_y": 1066,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232438_833273",
+      "success": true
+    },
+    {
+      "coordinate": "an40",
+      "position": "Bottom Right",
+      "intended_x": 580,
+      "intended_y": 1066,
+      "actual_x": 580,
+      "actual_y": 1066,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232441_593180",
+      "success": true
+    },
+    {
+      "coordinate": "ac10",
+      "position": "Near Top Left",
+      "intended_x": 107,
+      "intended_y": 256,
+      "actual_x": 107,
+      "actual_y": 256,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232444_276607",
+      "success": true
+    },
+    {
+      "coordinate": "al30",
+      "position": "Near Bottom Right",
+      "intended_x": 494,
+      "intended_y": 796,
+      "actual_x": 494,
+      "actual_y": 796,
+      "error_distance": 0.0,
+      "cell_width": 43,
+      "cell_height": 27,
+      "timestamp": "20250222_232446_993417",
+      "success": true
+    }
+  ],
+  "summary": {
+    "total_points": 9,
+    "successful_clicks": 9,
+    "average_error": 0.0,
+    "max_error": 0,
+    "grid_size": {
+      "width": 1728,
+      "height": 1117,
+      "cell_width": 43,
+      "cell_height": 27
+    }
+  }
+}
