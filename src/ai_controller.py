@@ -609,6 +609,15 @@ class AIController:
             QMetaObject.invokeMethod(self, "_initialize_windows", Qt.QueuedConnection)
         logging.info("AIController initialization complete.")
 
+        # Add spotlight state tracking
+        self.spotlight_open = False
+        
+        # Load environment variables from .env file
+        env_path = Path(__file__).parent.parent / ".env"
+        load_dotenv(env_path)
+        
+        # ... rest of existing initialization code ...
+
     def _initialize_windows(self):
         """
         Initialize UI components on the main thread.
@@ -956,11 +965,8 @@ class AIController:
 
     def execute_action(self, user_request):
         """
-        Execute a user-provided high-level task by:
-          1. Taking initial screenshot
-          2. Planning the task with visual context
-          3. Executing each step with verification
-          4. Reporting results
+        Execute a user-provided high-level task by planning and executing one step at a time,
+        continuing until the goal is achieved.
 
         Args:
             user_request (str): The high-level instruction.
@@ -971,8 +977,8 @@ class AIController:
         if self.window:
             self.window.status_display.append("🎯 <b>Task History</b>")
             self.window.status_display.append("-------------------")
-            self.window.status_display.append(f"\n📋 <b>New Task:</b> {user_request}")
-            
+            self.window.status_display.append(f"\n📋 <b>Original Task:</b> {user_request}")
+
         # Hide any active dialogs before taking screenshot
         if self.window:
             QMetaObject.invokeMethod(
@@ -981,175 +987,245 @@ class AIController:
                 Qt.QueuedConnection
             )
             time.sleep(0.2)  # Give time for dialogs to hide
-            
-        # Take initial screenshot with grid
-        initial_screenshot = self.capture_grid_screenshot()
-        
-        # Plan task with visual context
-        prompt = f"""
-You are looking at a screenshot with a 40x40 grid overlay. The grid coordinates go from aa01 to an40.
-
-IMPORTANT CONTEXT:
-- You are starting from a clean macOS desktop with no applications open
-- You will need to open any required applications from scratch
-- CRITICAL: For Terminal specifically:
-  1. ALWAYS use Spotlight (Command+Space) to open Terminal
-  2. NEVER click on Terminal icons or files in Finder
-  3. Follow these exact steps:
-     a. Press Command+Space to open Spotlight
-     b. Type "terminal" and wait 0.5 seconds
-     c. Press Enter and wait 2.0 seconds for Terminal to load
-     d. Verify Terminal is open and focused before proceeding
-- For other applications:
-  - Use Spotlight (Command+Space) to launch applications
-  - Wait for applications to fully load before proceeding
-  - Verify each application is properly opened before interacting with it
-
-Your task is to find and click on the target described in: "{user_request}"
-
-CRITICAL INSTRUCTIONS:
-1. COMPLETELY IGNORE the "AI Screen Control" window and any automation UI elements
-2. Look carefully at the screenshot and find the exact location of the target in the actual application
-3. Respond with ONLY the grid coordinate in this format: %%%COORDINATE@@@ (e.g., %%%aa01@@@)
-4. The coordinate must be in the format aa01 to an40 (first letter always 'a', second letter 'a' to 'n', numbers 01-40)
-5. Be consistent - if this is a verification or follow-up step for a previously identified target, use the same coordinate
-
-Respond with ONLY the grid coordinate in %%%COORDINATE@@@ format. No other text."""
-
-        response = self.planner.models.generate_content(model="gemini-2.0-flash-thinking-exp-01-21", contents=[prompt, initial_screenshot])
-        steps = []
-        for line in response.text.strip().split("\n"):
-            line = line.strip()
-            if line:
-                if ". " in line:
-                    line = line.split(". ", 1)[1]
-                steps.append(line)
-                
-        if self.window:
-            self.window.queue_ai_response({
-                "response_type": "plan",
-                "response": {
-                    "raw_response": response.text,
-                    "processed_steps": steps
-                }
-            })
-            self.window.status_display.append("\nPlan:")
-            for idx, step in enumerate(steps, 1):
-                self.window.status_display.append(f"{idx}. {step}")
 
         results = []
-        for idx, step in enumerate(steps, 1):
+        current_request = user_request
+        max_steps = 20  # Safety limit to prevent infinite loops
+        step_count = 0
+
+        while step_count < max_steps:
+            step_count += 1
             if self.window:
-                self.window.status_display.append(f"\n📍 Executing Step {idx}/{len(steps)}")
+                self.window.status_display.append(f"\n🤔 Planning step {step_count}...")
+
             try:
+                # Plan the next step with awareness of previous steps
+                steps = self.plan_task(current_request, previous_steps=results)
+                if not steps:
+                    if self.window:
+                        self.window.status_display.append("✓ Task completed - no more steps needed.")
+                    break
+
+                step = steps[0]  # We only get one step at a time now
+                
+                if self.window:
+                    self.window.status_display.append(f"\n📍 Executing step {step_count}: {step}")
+
+                # Execute the step
                 coordinate, verification = self.execute_step(step)
-                results.append({
+                result = {
                     "step": step,
                     "coordinate": coordinate,
                     "verification": verification
-                })
-                status = "✓" if verification == "SUCCESS" else "?" if verification == "UNCLEAR" else "✗"
-                if self.window:
-                    self.window.status_display.append(f"{status} Step completed: {verification}")
+                }
+                results.append(result)
+
+                # Handle the result
+                if verification == "SUCCESS":
+                    if self.window:
+                        self.window.status_display.append(f"✓ Step completed successfully")
+                    
+                    # Ask AI if the overall goal is achieved
+                    completion_prompt = f"""
+Analyze if this high-level task has been completed:
+Original request: "{user_request}"
+Steps completed so far: {[r['step'] for r in results]}
+Last step completed: "{step}"
+
+Consider:
+1. Has the main objective been achieved?
+2. Are there any remaining necessary actions?
+3. Is the system in the expected final state?
+
+Respond with ONLY one of:
+- COMPLETED (if the task is fully done)
+- CONTINUE (if more steps are needed)
+- FAILED (if the task cannot be completed)
+
+Then in parentheses, briefly explain why.
+Example: "CONTINUE (Need to save the file after changes)"
+"""
+                    completion_check = self.executor.models.generate_content(
+                        model="gemini-2.0-flash-thinking-exp-01-21",
+                        contents=completion_prompt
+                    )
+                    
+                    status = completion_check.text.strip().upper()
+                    if status.startswith("COMPLETED"):
+                        if self.window:
+                            self.window.status_display.append(f"✨ Task completed: {status}")
+                        break
+                    elif status.startswith("FAILED"):
+                        if self.window:
+                            self.window.status_display.append(f"❌ Task failed: {status}")
+                        break
+                    else:
+                        # Update the current request to focus on remaining work
+                        remaining_prompt = f"""
+Given the original task: "{user_request}"
+And completed steps: {[r['step'] for r in results]}
+
+What specifically remains to be done? Phrase this as a specific, actionable request.
+Response should be a single sentence focused on the next logical goal.
+"""
+                        remaining_response = self.executor.models.generate_content(
+                            model="gemini-2.0-flash-thinking-exp-01-21",
+                            contents=remaining_prompt
+                        )
+                        current_request = remaining_response.text.strip()
+                        if self.window:
+                            self.window.status_display.append(f"➡️ Next goal: {current_request}")
+
+                else:  # FAILURE or UNCLEAR
+                    if self.window:
+                        self.window.status_display.append(f"⚠️ Step failed: {verification}")
+                    # Retry the same step with a modified request
+                    retry_prompt = f"""
+The following step failed: "{step}"
+Verification result: {verification}
+
+Previous steps and their results:
+{chr(10).join(f"- {r['step']} -> {r['verification']}" for r in results[:-1])}
+
+Rephrase the step to achieve the same goal in a different way.
+Consider:
+1. Alternative UI elements that could achieve the same result
+2. Different approaches (e.g., hotkey instead of click)
+3. Breaking down the step into smaller steps
+4. What worked and didn't work in previous steps
+
+Original task context: "{current_request}"
+
+Respond with a rephrased version of the request that might work better.
+"""
+                    retry_response = self.executor.models.generate_content(
+                        model="gemini-2.0-flash-thinking-exp-01-21",
+                        contents=retry_prompt
+                    )
+                    current_request = retry_response.text.strip()
+                    if self.window:
+                        self.window.status_display.append(f"🔄 Retrying with modified approach: {current_request}")
+
             except Exception as e:
                 if self.window:
-                    self.window.status_display.append(f"❌ Step failed: {str(e)}")
-                results.append({"step": step, "error": str(e)})
+                    self.window.status_display.append(f"❌ Error during execution: {str(e)}")
+                results.append({"step": step if 'step' in locals() else "unknown", "error": str(e)})
                 break
+
+        if step_count >= max_steps:
+            if self.window:
+                self.window.status_display.append("⚠️ Reached maximum number of steps, stopping execution.")
+
         return results
 
-    def plan_task(self, user_request):
+    def plan_task(self, user_request, previous_steps=None):
         """
-        Use AI to break down a high-level user request into discrete actionable steps.
-
-        Args:
-            user_request (str): The high-level instruction provided by the user.
-
-        Returns:
-            list: A list of actionable step descriptions.
+        Use AI to determine the next single logical step to achieve the user's request.
         """
+        # Build context from previous steps if available
+        context = ""
+        successful_steps = []
+        if previous_steps:
+            context = "\nPreviously completed steps:\n"
+            for i, step_info in enumerate(previous_steps, 1):
+                step = step_info.get("step", "unknown")
+                verification = step_info.get("verification", "unknown")
+                context += f"{i}. {step} -> {verification}\n"
+                if verification == "SUCCESS":
+                    successful_steps.append(step)
+                    # Check if Spotlight was opened
+                    if "HOTKEY:command+space" in step or "HOTKEY:spotlight" in step:
+                        self.spotlight_open = True
+
         prompt = f"""
-You are a precise UI automation planner. Break down this request into specific, actionable steps:
+You are a precise UI automation planner. Determine the SINGLE most logical next step to achieve this request:
 "{user_request}"
+{context}
 
-You have EXACTLY 4 types of actions available to achieve any goal:
+CRITICAL RULES:
+1. Return ONLY ONE step that starts with TYPE:, CLICK:, HOTKEY:, or TERMINAL:
+2. After the prefix, describe the action precisely
+3. NO extra text, comments, or explanations
+4. For application launching:
+   {'- DO NOT use Command+Space or Spotlight as it is already open' if self.spotlight_open else '- ALWAYS start with Spotlight: HOTKEY:command+space'}
+5. Think carefully about the logical sequence - what MUST happen first?
+6. Consider the current state and previous steps - what is the NEXT thing that needs to happen?
+7. NEVER repeat any of these previously successful steps:
+   {chr(10).join(f'   - {step}' for step in successful_steps)}
+8. If a previous step failed, consider an alternative approach
+9. Each step must make progress towards the goal - no redundant actions
+
+You have EXACTLY 4 types of actions available:
 
 1. TYPE: For entering text
    Format: TYPE:<text to type>
    Example: TYPE:Hello World
-   Example: TYPE:recipient@email.com
 
 2. CLICK: For clicking UI elements
    Format: CLICK:<description of element to click>
    Example: CLICK:New Message button
-   Example: CLICK:Send button
 
 3. HOTKEY: For keyboard shortcuts
    Format: HOTKEY:<key combination>
    Available hotkeys:
-   - HOTKEY:command+space (Spotlight)
+   {'- HOTKEY:enter' if self.spotlight_open else '- HOTKEY:command+space (Spotlight)'}
    - HOTKEY:enter
    - HOTKEY:escape
    - HOTKEY:tab
-   Example: HOTKEY:command+space
 
 4. TERMINAL: For running terminal commands
    Format: TERMINAL:<command to run>
    Example: TERMINAL:ls -la
-   Example: TERMINAL:cd ~/Documents
 
-CRITICAL RULES:
-1. EVERY step must start with one of these exact prefixes: TYPE:, CLICK:, HOTKEY:, or TERMINAL:
-2. After the prefix, describe the action precisely
-3. ONE action per line
-4. NO extra text, comments, or explanations
-5. NO numbering or bullet points
-6. For application launching:
-   a. Start with HOTKEY:command+space
-   b. Then TYPE:<app name>
-   c. Then HOTKEY:enter
-   d. Then add a wait step: TYPE:WAIT
-
-Example Output:
-HOTKEY:command+space
-TYPE:Mail
-HOTKEY:enter
-TYPE:WAIT
+Example Response (ONLY ONE of these):
+{'TYPE:Mail' if self.spotlight_open else 'HOTKEY:command+space'}
+or
 CLICK:New Message button
-CLICK:To field
-TYPE:user@example.com
-CLICK:Subject field
-TYPE:Hello
-CLICK:Message body
-TYPE:This is a test message
-CLICK:Send button
 
-Respond with ONLY the steps, exactly as shown in the format above. No other text."""
+Respond with ONLY the single next step, exactly as shown in the format above. No other text."""
 
         response = self.planner.models.generate_content(model="gemini-2.0-flash-thinking-exp-01-21", contents=prompt)
         
         # Clean and process the response
-        steps = []
-        valid_prefixes = ["TYPE:", "CLICK:", "HOTKEY:", "TERMINAL:"]
+        step = response.text.strip()
         
-        for line in response.text.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Only accept lines that start with valid prefixes
-            if any(line.startswith(prefix) for prefix in valid_prefixes):
-                steps.append(line)
+        # Validate the step format
+        valid_prefixes = ["TYPE:", "CLICK:", "HOTKEY:", "TERMINAL:"]
+        if not any(step.startswith(prefix) for prefix in valid_prefixes):
+            raise ValueError("Invalid step format. Step must start with TYPE:, CLICK:, HOTKEY:, or TERMINAL:")
+        
+        # Verify step hasn't been successfully completed before
+        if step in successful_steps:
+            # If we somehow got a repeat step, try one more time with stronger emphasis
+            retry_prompt = f"""
+IMPORTANT: Generate a NEW step that has NOT been done before.
+Previous successful steps that MUST NOT be repeated:
+{chr(10).join(f'- {step}' for step in successful_steps)}
+
+Original request: {user_request}
+
+Follow the same format rules but provide a DIFFERENT step.
+"""
+            retry_response = self.planner.models.generate_content(
+                model="gemini-2.0-flash-thinking-exp-01-21",
+                contents=retry_prompt
+            )
+            step = retry_response.text.strip()
             
-        if not steps:
-            raise ValueError("No valid steps were generated. Each step must start with TYPE:, CLICK:, HOTKEY:, or TERMINAL:")
+            # Validate the retry step
+            if not any(step.startswith(prefix) for prefix in valid_prefixes):
+                raise ValueError("Invalid step format in retry")
+            if step in successful_steps:
+                raise ValueError("Unable to generate new unique step")
         
         self.save_ai_response("task_planning", user_request, {
             "prompt": prompt,
             "raw_response": response.text,
-            "processed_steps": steps,
+            "processed_steps": [step],
             "planning_context": {
                 "request": user_request,
+                "previous_steps": previous_steps,
+                "successful_steps": successful_steps,
                 "planning_time": time.time(),
                 "screen_bounds": {
                     "width": self.screen_mapper.actual_width,
@@ -1157,8 +1233,8 @@ Respond with ONLY the steps, exactly as shown in the format above. No other text
                 }
             }
         })
-        logging.debug("Task planning completed with steps: %s", steps)
-        return steps
+        logging.debug("Task planning completed with single step: %s", step)
+        return [step]
 
     def verify_step_completion(self, step, before_image, after_image):
         """
@@ -1338,6 +1414,11 @@ Respond with one word: SUCCESS or FAILURE.
         try:
             # Special handling for Command+Space (Spotlight)
             if hotkey_name == "spotlight":
+                # Check if Spotlight is already open
+                if self.spotlight_open:
+                    logging.info("Spotlight is already open, skipping Command+Space")
+                    return True
+                    
                 applescript = '''
                 tell application "System Events"
                     delay 0.2
@@ -1345,6 +1426,8 @@ Respond with one word: SUCCESS or FAILURE.
                     delay 0.2
                 end tell
                 '''
+                # Set spotlight state to open
+                self.spotlight_open = True
             # Handle special single keys
             elif len(keys) == 1:
                 key = keys[0]
@@ -1393,6 +1476,9 @@ Respond with one word: SUCCESS or FAILURE.
         except subprocess.CalledProcessError as e:
             logging.exception("Failed to execute hotkey %s: %s", hotkey_name, e)
             raise Exception(f"Failed to execute hotkey {hotkey_name}: {str(e)}")
+        except Exception as e:
+            logging.exception("Unexpected error executing hotkey %s: %s", hotkey_name, e)
+            raise
 
     def _get_key_code_map(self):
         """
@@ -2472,61 +2558,164 @@ class AIWorker(QThread):
         """
         Main execution method for the thread.
 
-        It plans the task, iteratively executes each step, captures screenshots,
-        and emits signals to update the UI.
+        It continuously plans and executes steps until the task is complete,
+        with retries for failed steps and progress updates via signals.
         """
         try:
-            self.progress.emit("\n🤔 Planning task steps...")
-            steps = self.controller.plan_task(self.request)
-            self.ai_response.emit({
-                "response_type": "plan",
-                "response": steps
-            })
+            self.progress.emit("\n🤔 Starting task execution...")
             results = []
-            for idx, step in enumerate(steps, 1):
+            current_request = self.request
+            max_steps = 20  # Safety limit to prevent infinite loops
+            step_count = 0
+
+            while step_count < max_steps:
+                step_count += 1
+                self.progress.emit(f"\n📍 Planning step {step_count}...")
+
+                # Plan the next step
+                steps = self.controller.plan_task(current_request)
+                if not steps:
+                    self.progress.emit("✓ Task completed - no more steps needed.")
+                    break
+
+                step = steps[0]  # We only get one step at a time now
                 self.task_update.emit({
                     "step": step,
                     "status": "start",
-                    "details": f"Starting step {idx}/{len(steps)}"
+                    "details": f"Executing step {step_count}: {step}"
                 })
-                try:
-                    before_img = self.controller.capture_grid_screenshot()
-                    if before_img:
-                        self.before_screenshot.emit(before_img)
-                    coord, verification = self.controller.execute_step(step)
-                    after_img = self.controller.capture_grid_screenshot()
-                    if after_img:
-                        self.after_screenshot.emit(after_img)
-                    result = {"step": step, "coordinate": coord, "verification": verification}
-                    results.append(result)
-                    self.ai_response.emit({
-                        "response_type": "verification",
-                        "response": {
-                            "result": verification,
-                            "details": f"Step {idx}: {step} - Coordinate: {coord}"
-                        }
-                    })
-                    status = "success" if verification == "SUCCESS" else "failure"
-                    self.task_update.emit({
-                        "step": step,
-                        "status": status,
-                        "details": f"Step {idx} completed with: {verification}"
-                    })
-                except Exception as e:
-                    err_msg = str(e)
-                    self.error.emit(err_msg)
-                    self.task_update.emit({
-                        "step": step,
-                        "status": "failure",
-                        "details": f"Step {idx} failed: {err_msg}"
-                    })
-                    results.append({"step": step, "error": err_msg})
-                    break
+
+                # Execute the step with retries
+                max_retries = 3
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        before_img = self.controller.capture_grid_screenshot()
+                        if before_img:
+                            self.before_screenshot.emit(before_img)
+
+                        coord, verification = self.controller.execute_step(step)
+                        
+                        after_img = self.controller.capture_grid_screenshot()
+                        if after_img:
+                            self.after_screenshot.emit(after_img)
+
+                        result = {"step": step, "coordinate": coord, "verification": verification}
+                        results.append(result)
+
+                        if verification == "SUCCESS":
+                            self.task_update.emit({
+                                "step": step,
+                                "status": "success",
+                                "details": f"Step {step_count} completed successfully"
+                            })
+
+                            # Check if task is complete
+                            completion_prompt = f"""
+Analyze if this high-level task has been completed:
+Original request: "{self.request}"
+Steps completed so far: {[r['step'] for r in results]}
+Last step completed: "{step}"
+
+Consider:
+1. Has the main objective been achieved?
+2. Are there any remaining necessary actions?
+3. Is the system in the expected final state?
+
+Respond with ONLY one of:
+- COMPLETED (if the task is fully done)
+- CONTINUE (if more steps are needed)
+- FAILED (if the task cannot be completed)
+
+Then in parentheses, briefly explain why.
+Example: "CONTINUE (Need to save the file after changes)"
+"""
+                            completion_check = self.controller.executor.models.generate_content(
+                                model="gemini-2.0-flash-thinking-exp-01-21",
+                                contents=completion_prompt
+                            )
+                            
+                            status = completion_check.text.strip().upper()
+                            if status.startswith("COMPLETED"):
+                                self.progress.emit(f"✨ Task completed: {status}")
+                                break
+                            elif status.startswith("FAILED"):
+                                self.progress.emit(f"❌ Task failed: {status}")
+                                break
+                            else:
+                                # Update the current request to focus on remaining work
+                                remaining_prompt = f"""
+Given the original task: "{self.request}"
+And completed steps: {[r['step'] for r in results]}
+
+What specifically remains to be done? Phrase this as a specific, actionable request.
+Response should be a single sentence focused on the next logical goal.
+"""
+                                remaining_response = self.controller.executor.models.generate_content(
+                                    model="gemini-2.0-flash-thinking-exp-01-21",
+                                    contents=remaining_prompt
+                                )
+                                current_request = remaining_response.text.strip()
+                                self.progress.emit(f"➡️ Next goal: {current_request}")
+                            break  # Break retry loop on success
+
+                        else:  # FAILURE or UNCLEAR
+                            if retry_count < max_retries - 1:
+                                retry_count += 1
+                                self.progress.emit(f"⚠️ Step failed ({verification}), retrying... (Attempt {retry_count + 1}/{max_retries})")
+                                time.sleep(1)  # Wait before retry
+                                continue
+                            else:
+                                # All retries failed, try alternative approach
+                                retry_prompt = f"""
+The following step failed after {max_retries} attempts: "{step}"
+Verification result: {verification}
+
+Rephrase the step to achieve the same goal in a different way.
+Consider:
+1. Alternative UI elements that could achieve the same result
+2. Different approaches (e.g., hotkey instead of click)
+3. Breaking down the step into smaller steps
+
+Original task context: "{current_request}"
+
+Respond with a rephrased version of the request that might work better.
+"""
+                                retry_response = self.controller.executor.models.generate_content(
+                                    model="gemini-2.0-flash-thinking-exp-01-21",
+                                    contents=retry_prompt
+                                )
+                                current_request = retry_response.text.strip()
+                                self.progress.emit(f"🔄 Retrying with modified approach: {current_request}")
+                                break  # Break retry loop to try new approach
+
+                    except Exception as e:
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            self.progress.emit(f"⚠️ Step error, retrying... (Attempt {retry_count + 1}/{max_retries})")
+                            time.sleep(1)
+                            continue
+                        else:
+                            err_msg = str(e)
+                            self.error.emit(err_msg)
+                            self.task_update.emit({
+                                "step": step,
+                                "status": "failure",
+                                "details": f"Step failed after all retries: {err_msg}"
+                            })
+                            results.append({"step": step, "error": err_msg})
+                            raise  # Re-raise to exit the main loop
+
+            if step_count >= max_steps:
+                self.progress.emit("⚠️ Reached maximum number of steps, stopping execution.")
+
             self.finished.emit(results)
+
         except Exception as e:
             err_msg = str(e)
             self.error.emit(err_msg)
             self.show_message.emit("Task Failed", err_msg)
+            self.finished.emit(results if 'results' in locals() else [])
 
 # Extra padding for ai_controller.py to meet minimum line requirements
 # -------------------------------------------------------------------------
